@@ -74,3 +74,7 @@ manga_translations.backup*.sqlite3
 manga_translations.pre-autoscroll-clean*.sqlite3
 manga_translations.sqlite3
 reports/
+_models/
+*.pt.onnx
+*.onnx
+_
