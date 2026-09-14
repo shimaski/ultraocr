@@ -1,9 +1,0 @@
-{
-  "window_handle": 198764,
-  "mode": "Google",
-  "source_lang": "en",
-  "model": "qwen2.5:3b-instruct",
-  "fps": 30,
-  "overlay_enabled": true,
-  "japanese_enabled": false
-}
