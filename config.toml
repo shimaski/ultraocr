@@ -1,0 +1,59 @@
+[capture]
+backend = "auto"
+fps = 30
+monitor = 0
+# Optional capture target by window title on Windows.
+# window_title = "Chrome"
+# Optional capture region in screen coordinates: left, top, right, bottom.
+# region = [0, 0, 1920, 1080]
+
+[diff]
+tile_size = 96
+pixel_threshold = 22
+min_changed_ratio = 0.015
+roi_padding = 20
+stable_ms = 220
+max_rois_per_tick = 12
+large_change_tile_ratio = 0.55
+scroll_cooldown_ms = 300
+# Wait after scrolling stops before capturing the selected reader region.
+scroll_settle_ms = 550
+
+[ocr]
+enabled = true
+# PaddleOCR language names: en | japan | korean
+source_lang = "en"
+# Extra fallback OCR engines; the best-scoring result wins per region.
+extra_langs = []
+min_confidence = 0.55
+ignore_top_pixels = 120
+# Detection model: mobile (fast, recommended for scroll) | server (slower)
+det_model = "mobile"
+# Recognition model: mobile (fast) | server (better on stylized comic fonts)
+rec_model = "mobile"
+# Text detector: paddle (default, validated) | hybrid (experimental) | comic
+# (ONNX comic-text-detector via GPU DirectML — faster but still
+# experimental: fragments stylized handwriting)
+detector = "paddle"
+# Do not repeat a large selected viewport at 2x.
+upscale_retry_max_pixels = 250000
+
+[translation]
+target_lang = "pt-BR"
+provider = "google"
+gemini_min_interval = 1.0
+# Providers: google (free, no key) | deepl (needs deepl_api_key) | echo (debug)
+# deepl_api_key = ""
+# deepl_free = true
+timeout_seconds = 20
+fuzzy_threshold = 92
+
+[overlay]
+enabled = true
+font_family = "Segoe UI"
+font_size = 18
+opacity = 0.94
+ttl_seconds = 900
+
+[cache]
+path = "manga_translations.sqlite3"

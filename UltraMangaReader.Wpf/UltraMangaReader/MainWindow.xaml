@@ -1,0 +1,103 @@
+<Window x:Class="UltraMangaReader.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        mc:Ignorable="d"
+        Title="Ultra Manga Reader"
+        Height="920"
+        Width="1480"
+        MinHeight="700"
+        MinWidth="1100"
+        WindowStartupLocation="CenterScreen">
+    <DockPanel Background="#111315">
+        <Border DockPanel.Dock="Top"
+                Background="#171A1D"
+                BorderBrush="#24292E"
+                BorderThickness="0,0,0,1"
+                Padding="14,10">
+            <StackPanel>
+                <DockPanel LastChildFill="True">
+                    <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                        <Button x:Name="BackButton"
+                                Width="76"
+                                Height="32"
+                                Margin="0,0,8,0"
+                                Click="BackButton_OnClick">Back</Button>
+                        <Button x:Name="ForwardButton"
+                                Width="76"
+                                Height="32"
+                                Margin="0,0,8,0"
+                                Click="ForwardButton_OnClick">Forward</Button>
+                        <Button x:Name="ReloadButton"
+                                Width="76"
+                                Height="32"
+                                Margin="0,0,12,0"
+                                Click="ReloadButton_OnClick">Reload</Button>
+                    </StackPanel>
+
+                    <DockPanel>
+                        <TextBox x:Name="UrlTextBox"
+                                 Height="34"
+                                 VerticalContentAlignment="Center"
+                                 Margin="0,0,8,0"
+                                 KeyDown="UrlTextBox_OnKeyDown"
+                                 Text="https://mangadex.org" />
+                        <Button x:Name="OpenButton"
+                                Width="92"
+                                Height="34"
+                                Click="OpenButton_OnClick">Open</Button>
+                    </DockPanel>
+                </DockPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <TextBlock VerticalAlignment="Center" Foreground="#E5E7EB" Margin="0,0,8,0">Source</TextBlock>
+                    <ComboBox x:Name="SourceComboBox" Width="120" SelectedIndex="0" Margin="0,0,12,0">
+                        <ComboBoxItem Content="Auto" />
+                        <ComboBoxItem Content="en" />
+                        <ComboBoxItem Content="japan" />
+                    </ComboBox>
+
+                    <TextBlock VerticalAlignment="Center" Foreground="#E5E7EB" Margin="0,0,8,0">Translate</TextBlock>
+                    <ComboBox x:Name="TranslateModeComboBox" Width="140" SelectedIndex="0" Margin="0,0,12,0">
+                        <ComboBoxItem Content="Echo" />
+                        <ComboBoxItem Content="Ollama" />
+                    </ComboBox>
+
+                    <TextBlock VerticalAlignment="Center" Foreground="#E5E7EB" Margin="0,0,8,0">Analyze</TextBlock>
+                    <ComboBox x:Name="AnalyzeModeComboBox" Width="180" SelectedIndex="0" Margin="0,0,12,0">
+                        <ComboBoxItem Content="Manual Analyze" />
+                        <ComboBoxItem Content="Auto When Stable" />
+                        <ComboBoxItem Content="Continuous Low FPS" />
+                    </ComboBox>
+
+                    <Button x:Name="StartButton"
+                            Width="130"
+                            Height="32"
+                            Margin="0,0,8,0"
+                            Click="StartButton_OnClick">Start</Button>
+                    <Button x:Name="InspectButton"
+                            Width="130"
+                            Height="32"
+                            Margin="0,0,8,0"
+                            Click="InspectButton_OnClick">Inspect OCR</Button>
+                    <Button x:Name="SelectRegionButton"
+                            Width="130"
+                            Height="32"
+                            Click="SelectRegionButton_OnClick">Select Region</Button>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <StatusBar DockPanel.Dock="Bottom" Background="#171A1D" Foreground="#E5E7EB">
+            <StatusBarItem>
+                <TextBlock x:Name="StatusTextBlock" Text="Reader shell ready. Next step is wiring OCR/runtime into this native app." />
+            </StatusBarItem>
+        </StatusBar>
+
+        <Grid>
+            <wv2:WebView2 x:Name="ReaderBrowser" NavigationCompleted="ReaderBrowser_OnNavigationCompleted" />
+        </Grid>
+    </DockPanel>
+</Window>

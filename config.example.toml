@@ -1,0 +1,58 @@
+[capture]
+backend = "auto"
+fps = 30
+monitor = 0
+# Optional capture target by window title on Windows.
+# window_title = "Chrome"
+# Optional capture region in screen coordinates: left, top, right, bottom.
+# region = [0, 0, 1920, 1080]
+
+[diff]
+tile_size = 96
+pixel_threshold = 22
+min_changed_ratio = 0.015
+roi_padding = 20
+stable_ms = 220
+max_rois_per_tick = 12
+large_change_tile_ratio = 0.55
+scroll_cooldown_ms = 300
+
+[ocr]
+enabled = true
+# PaddleOCR language names: en | japan | korean
+source_lang = "en"
+# Extra fallback OCR engines; the best-scoring result wins per region.
+extra_langs = []
+min_confidence = 0.55
+ignore_top_pixels = 120
+# Detection model: mobile (fast, recommended for scroll) | server (slower)
+det_model = "mobile"
+# Recognition model: mobile (fast) | server (better on stylized comic fonts)
+rec_model = "mobile"
+# Text detector: paddle (recommended, best quality today) | comic
+# (ONNX comic-text-detector via GPU DirectML — faster, calibrated for
+# handwritten strokes: threshold 0.25 + close-box merging)
+detector = "comic"
+
+[translation]
+target_lang = "pt-BR"
+# Providers: google (free, no key) | deepl (needs deepl_api_key) | echo (debug)
+provider = "google"
+# deepl_api_key = ""
+# deepl_free = true
+# Minimum spacing between Gemini requests (seconds). Lower = faster, more 429s.
+# gemini_min_interval = 1.0
+# API keys are read from MANGA_RT_GEMINI_API_KEY,
+# MANGA_RT_DEEPL_API_KEY, or MANGA_RT_LIBRE_API_KEY.
+timeout_seconds = 20
+fuzzy_threshold = 92
+
+[overlay]
+enabled = true
+font_family = "Segoe UI"
+font_size = 18
+opacity = 0.94
+ttl_seconds = 900
+
+[cache]
+path = "manga_translations.sqlite3"

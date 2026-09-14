@@ -1,0 +1,21 @@
+Collecting deep-translator
+  Using cached deep_translator-1.11.4-py3-none-any.whl.metadata (30 kB)
+Collecting beautifulsoup4<5.0.0,>=4.9.1 (from deep-translator)
+  Downloading beautifulsoup4-4.15.0-py3-none-any.whl.metadata (3.8 kB)
+Requirement already satisfied: requests<3.0.0,>=2.23.0 in .\.venv311\Lib\site-packages (from deep-translator) (2.34.2)
+Collecting soupsieve>=1.6.1 (from beautifulsoup4<5.0.0,>=4.9.1->deep-translator)
+  Downloading soupsieve-2.9.2-py3-none-any.whl.metadata (4.6 kB)
+Requirement already satisfied: typing-extensions>=4.0.0 in .\.venv311\Lib\site-packages (from beautifulsoup4<5.0.0,>=4.9.1->deep-translator) (4.15.0)
+Requirement already satisfied: charset_normalizer<4,>=2 in .\.venv311\Lib\site-packages (from requests<3.0.0,>=2.23.0->deep-translator) (3.4.7)
+Requirement already satisfied: idna<4,>=2.5 in .\.venv311\Lib\site-packages (from requests<3.0.0,>=2.23.0->deep-translator) (3.15)
+Requirement already satisfied: urllib3<3,>=1.26 in .\.venv311\Lib\site-packages (from requests<3.0.0,>=2.23.0->deep-translator) (2.7.0)
+Requirement already satisfied: certifi>=2023.5.7 in .\.venv311\Lib\site-packages (from requests<3.0.0,>=2.23.0->deep-translator) (2026.4.22)
+Using cached deep_translator-1.11.4-py3-none-any.whl (42 kB)
+Downloading beautifulsoup4-4.15.0-py3-none-any.whl (109 kB)
+Downloading soupsieve-2.9.2-py3-none-any.whl (37 kB)
+Installing collected packages: soupsieve, beautifulsoup4, deep-translator
+
+Successfully installed beautifulsoup4-4.15.0 deep-translator-1.11.4 soupsieve-2.9.2
+
+[notice] A new release of pip is available: 26.1.1 -> 26.2.1
+[notice] To update, run: C:\Users\adrie\ultraocr\.venv311\Scripts\python.exe -m pip install --upgrade pip

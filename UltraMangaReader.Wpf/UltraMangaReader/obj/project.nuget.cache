@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "jTy1IAIYw0E=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\adrie\\ultraocr\\UltraMangaReader.Wpf\\UltraMangaReader\\UltraMangaReader.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\adrie\\.nuget\\packages\\microsoft.web.webview2\\1.0.3967.48\\microsoft.web.webview2.1.0.3967.48.nupkg.sha512"
+  ],
+  "logs": []
+}
