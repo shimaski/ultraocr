@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import importlib
 import json
 import random
 import time
@@ -221,6 +222,125 @@ class EchoTranslator(Translator):
         context: str = "",
     ) -> TranslationResult:
         return TranslationResult(text=text, provider="echo")
+
+
+class ArgosLocalTranslator(Translator):
+    """Offline Argos Translate backend; models must be installed separately."""
+
+    _LANGUAGE_CODES = {
+        "english": "en",
+        "japan": "ja",
+        "japanese": "ja",
+        "korean": "ko",
+        "korea": "ko",
+        "chinese": "zh",
+        "portuguese": "pt",
+        "pt-br": "pb",
+        "portuguese (brazil)": "pb",
+    }
+
+    def __init__(self, source_lang: str = "en", target_lang: str = "pt-BR") -> None:
+        self._translations: dict[tuple[str, str], tuple[object, ...]] = {}
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+
+    @classmethod
+    def _language_code(cls, value: str) -> str:
+        code = (value or "").strip().lower()
+        return cls._LANGUAGE_CODES.get(code, code.split("-")[0])
+
+    def _get_translation(self, source_lang: str, target_lang: str):
+        try:
+            translate = importlib.import_module("argostranslate.translate")
+        except ImportError as exc:
+            raise RuntimeError(
+                "Backend offline ausente. Instale com: "
+                "python -m pip install -e \".[offline]\""
+            ) from exc
+
+        source_code = self._language_code(source_lang)
+        target_code = self._language_code(target_lang)
+        key = (source_code, target_code)
+        if key in self._translations:
+            return self._translations[key]
+        languages = translate.get_installed_languages()
+        source = next((lang for lang in languages if lang.code == source_code), None)
+        target = next((lang for lang in languages if lang.code == target_code), None)
+        if source is None or target is None:
+            available = ", ".join(lang.code for lang in languages) or "nenhum"
+            route_hint = (
+                " Para japonês -> português brasileiro, instale as rotas ja -> en "
+                "e en -> pb."
+                if source_code == "ja" and target_code == "pb"
+                else " Instale os pacotes compatíveis para esse par de idiomas."
+            )
+            raise RuntimeError(
+                f"Modelos Argos para {source_code} -> {target_code} não encontrados. "
+                f"Idiomas instalados: {available}.{route_hint}"
+            )
+
+        translation = source.get_translation(target)
+        if translation is not None:
+            path = (translation,)
+        else:
+            path = self._get_pivot_path(source, target, languages)
+        if path is None:
+            route_hint = (
+                " Para japonês -> português brasileiro, instale ja -> en e en -> pb."
+                if source_code == "ja" and target_code == "pb"
+                else " Instale os modelos necessários para esse par de idiomas."
+            )
+            raise RuntimeError(
+                f"Rota Argos {source_code} -> {target_code} indisponível. "
+                f"{route_hint}"
+            )
+        self._translations[key] = path
+        return path
+
+    @staticmethod
+    def _get_pivot_path(source: object, target: object, languages: list[object]):
+        for pivot_code in ("en",):
+            pivot = next((lang for lang in languages if lang.code == pivot_code), None)
+            if pivot is None or pivot.code in {source.code, target.code}:
+                continue
+            first = source.get_translation(pivot)
+            second = pivot.get_translation(target)
+            if first is not None and second is not None:
+                return first, second
+        return None
+
+    def translate(
+        self,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+        glossary: Glossary,
+        context: str = "",
+    ) -> TranslationResult:
+        cleaned = _clean_text(text)
+        if not cleaned:
+            return TranslationResult(text="", provider="argos")
+        path = self._get_translation(source_lang, target_lang)
+        translated = cleaned
+        for translation in path:
+            translated = translation.translate(translated)
+        if not translated or not str(translated).strip():
+            raise RuntimeError("Argos Translate retornou uma tradução vazia")
+        return TranslationResult(
+            text=glossary.repair_protected_names(str(translated).strip()),
+            provider="argos",
+        )
+
+    def check_health(self) -> tuple[bool, str]:
+        try:
+            self._get_translation(self.source_lang, self.target_lang)
+        except (RuntimeError, ImportError) as exc:
+            return False, str(exc)
+        return True, (
+            "Argos offline pronto "
+            f"({self._language_code(self.source_lang)} -> "
+            f"{self._language_code(self.target_lang)})"
+        )
 
 
 class GoogleWebTranslator(Translator):
@@ -1126,9 +1246,14 @@ def create_translator(config: object, echo: bool = False) -> Translator:
         )
     if provider == "echo":
         return EchoTranslator()
+    if provider == "argos":
+        return ArgosLocalTranslator(
+            source_lang=str(getattr(config, "ocr").source_lang or "en"),
+            target_lang=str(translation.target_lang or "pt-BR"),
+        )
     raise RuntimeError(
         f"Unknown translation provider {provider!r}. "
-        "Use one of: google, deepl, echo."
+        "Use one of: google, deepl, gemini, libre, argos, echo."
     )
 
 

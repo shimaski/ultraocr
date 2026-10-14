@@ -95,7 +95,26 @@ class PaddleOcrEngine(OcrEngine):
     ) -> list[TextRegion]:
         """First pass at native size; stylized comic fonts often read weak, so
         a low-confidence result triggers one retry on a 2x upscaled crop."""
-        best_regions = self._recognize_best_for_crop(crop, region, image, check)
+        max_input_side = max(
+            1,
+            int(getattr(getattr(self, "config", None), "max_input_side", 640)),
+        )
+        scale = min(1.0, max_input_side / max(crop.shape[:2]))
+        if scale < 1.0:
+            reduced = cv2.resize(
+                crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA
+            )
+            recognized = self._recognize_best_for_crop(
+                reduced,
+                Rect(0, 0, reduced.shape[1], reduced.shape[0]),
+                reduced,
+                check,
+            )
+            best_regions = _remap_scaled_regions(
+                recognized, scale=scale, offset=region, image=image
+            )
+        else:
+            best_regions = self._recognize_best_for_crop(crop, region, image, check)
         check()
         retry_limit = int(
             getattr(getattr(self, "config", None), "upscale_retry_max_pixels", 250_000)
@@ -131,6 +150,9 @@ class PaddleOcrEngine(OcrEngine):
         primary_lang = self.languages[0]
         primary_engine = self._get_engine(primary_lang)
         primary_regions = self._run_engine(primary_engine, crop, region, primary_lang, full_image, check)
+        primary_regions = self._retry_vertical_japanese(
+            crop, region, full_image, primary_lang, primary_regions, check
+        )
         primary_score = _score_regions(primary_regions)
 
         if len(self.languages) == 1:
@@ -143,11 +165,47 @@ class PaddleOcrEngine(OcrEngine):
         for lang in self.languages[1:]:
             engine = self._get_engine(lang)
             parsed = self._run_engine(engine, crop, region, lang, full_image, check)
+            parsed = self._retry_vertical_japanese(
+                crop, region, full_image, lang, parsed, check
+            )
             score = _score_regions(parsed)
+            if (
+                lang == "japan"
+                and _contains_japanese_kana(primary_regions)
+                and _contains_japanese_kana(parsed)
+            ):
+                return parsed
             if score > best_score:
                 best_regions = parsed
                 best_score = score
         return best_regions
+
+    def _retry_vertical_japanese(
+        self,
+        crop: np.ndarray,
+        region: Rect,
+        full_image: np.ndarray,
+        lang: str,
+        parsed: list[TextRegion],
+        check: Callable[[], None],
+    ) -> list[TextRegion]:
+        if (
+            lang != "japan"
+            or getattr(self.config, "rec_model", "mobile") != "mobile"
+            or not any(
+                _contains_japanese_kana([item])
+                and item.bbox.height >= max(60, item.bbox.width * 1.25)
+                for item in parsed
+            )
+        ):
+            return parsed
+
+        # The Japanese mobile recognizer can confidently misread vertical
+        # manga text. Retry only tall Japanese line boxes with the more robust
+        # server recognizer; English and horizontal Japanese stay on mobile.
+        server = self._get_engine_variant("japan", "server")
+        retried = self._run_engine(server, crop, region, lang, full_image, check)
+        return retried if _contains_japanese_kana(retried) else parsed
 
     def _run_engine(
         self,
@@ -169,7 +227,9 @@ class PaddleOcrEngine(OcrEngine):
 
         return parse_paddle_result(result, offset, lang, full_image)
 
-    def _build_engine(self, paddle_ocr_cls: object, lang: str) -> object:
+    def _build_engine(
+        self, paddle_ocr_cls: object, lang: str, rec_model_override: str | None = None
+    ) -> object:
         # Fastest path: disable the document preprocessor (UVDoc +
         # PP-LCNet orientation) that PaddleX 3.x enables by default. It adds
         # ~1.5s per crop and several model loads; the comic detector already
@@ -188,27 +248,34 @@ class PaddleOcrEngine(OcrEngine):
             # PP-OCRv5 mobile detection is several times faster than the
             # server model, which matters for continuous scroll translation.
             first_kwargs["text_detection_model_name"] = "PP-OCRv5_mobile_det"
-        rec_model = getattr(self.config, "rec_model", "mobile")
+        rec_model = rec_model_override or getattr(self.config, "rec_model", "mobile")
         if rec_model == "server":
-            first_kwargs["text_recognition_model_name"] = f"{lang}_PP-OCRv5_server_rec"
+            first_kwargs["text_recognition_model_name"] = (
+                "PP-OCRv5_server_rec"
+                if lang == "japan"
+                else f"{lang}_PP-OCRv5_server_rec"
+            )
         else:
             # Explicitly request the mobile recognizer. Without this, newer
             # PaddleX builds default to the slow server recognizer even when
             # rec_model = "mobile" (seen in reader_stderr.log).
-            # NOTE: PaddleX 3.x has NO `japan_PP-OCRv5_mobile_rec` in its
-            # registry (only japan_PP-OCRv3). Using an unregistered name makes
-            # the constructor fall back to the slow default engine. Map the
-            # known-good v5 names; the generic v5 covers everything else.
-            v5_langs = {
-                "en", "korean", "latin", "eslav", "th", "el", "arabic",
-                "te", "ta", "devanagari", "cyrillic",
-            }
-            if lang in v5_langs:
+            # PaddleX ships a dedicated Japanese mobile recognizer on v3;
+            # the generic v5 mobile model is not a Japanese substitute.
+            if lang == "japan":
                 first_kwargs["text_recognition_model_name"] = (
-                    f"{lang}_PP-OCRv5_mobile_rec"
+                    "japan_PP-OCRv3_mobile_rec"
                 )
             else:
-                first_kwargs["text_recognition_model_name"] = "PP-OCRv5_mobile_rec"
+                v5_langs = {
+                    "en", "korean", "latin", "eslav", "th", "el", "arabic",
+                    "te", "ta", "devanagari", "cyrillic",
+                }
+                if lang in v5_langs:
+                    first_kwargs["text_recognition_model_name"] = (
+                        f"{lang}_PP-OCRv5_mobile_rec"
+                    )
+                else:
+                    first_kwargs["text_recognition_model_name"] = "PP-OCRv5_mobile_rec"
 
         constructors: list[dict[str, object]] = [first_kwargs]
         constructors.extend(
@@ -234,17 +301,27 @@ class PaddleOcrEngine(OcrEngine):
         raise RuntimeError(f"Unable to initialize PaddleOCR for lang={lang!r}")
 
     def _get_engine(self, lang: str) -> object:
+        return self._get_engine_variant(
+            lang, str(getattr(self.config, "rec_model", "mobile"))
+        )
+
+    def _get_engine_variant(self, lang: str, rec_model: str) -> object:
         key = (
             lang,
             str(getattr(self.config, "det_model", "mobile")),
-            str(getattr(self.config, "rec_model", "mobile")),
+            rec_model,
         )
+        engine = _ENGINE_CACHE.get(key)
+        if engine is not None:
+            return engine
         with _ENGINE_LOCK:
             engine = _ENGINE_CACHE.get(key)
             if engine is None:
-                engine = self._build_engine(self._paddle_ocr_cls, lang)
+                engine = self._build_engine(
+                    self._paddle_ocr_cls, lang, rec_model_override=rec_model
+                )
                 _ENGINE_CACHE[key] = engine
-            return engine
+        return engine
 
 
 def lower_thread_priority() -> None:
@@ -559,6 +636,10 @@ def parse_paddle_result(
         x2 = offset.x + max(xs)
         y2 = offset.y + max(ys)
         bbox = Rect(x=x, y=y, width=max(1, x2 - x), height=max(1, y2 - y))
+        polygon = tuple(
+            (offset.x + float(point[0]), offset.y + float(point[1]))
+            for point in points
+        )
         regions.append(
             TextRegion(
                 bbox=bbox,
@@ -566,6 +647,7 @@ def parse_paddle_result(
                 confidence=float(confidence),
                 source_lang=lang,
                 visual_hash=perceptual_region_hash(full_image, bbox),
+                polygons=(polygon,),
             )
         )
 
@@ -607,6 +689,10 @@ def _parse_paddle_dict_result(
             x2 = offset.x + max(xs)
             y2 = offset.y + max(ys)
             bbox = Rect(x=x, y=y, width=max(1, x2 - x), height=max(1, y2 - y))
+            polygon = tuple(
+                (offset.x + float(point[0]), offset.y + float(point[1]))
+                for point in parsed_points
+            )
             regions.append(
                 TextRegion(
                     bbox=bbox,
@@ -614,6 +700,7 @@ def _parse_paddle_dict_result(
                     confidence=confidence,
                     source_lang=lang,
                     visual_hash=perceptual_region_hash(full_image, bbox),
+                    polygons=(polygon,),
                 )
             )
 
@@ -677,6 +764,17 @@ def _remap_scaled_regions(
                 confidence=region.confidence,
                 source_lang=region.source_lang,
                 visual_hash=perceptual_region_hash(image, bbox),
+                metadata=dict(region.metadata),
+                polygons=tuple(
+                    tuple(
+                        (
+                            offset.x + float(point[0]) / scale,
+                            offset.y + float(point[1]) / scale,
+                        )
+                        for point in polygon
+                    )
+                    for polygon in region.polygons
+                ),
             )
         )
     return remapped
@@ -853,6 +951,9 @@ def group_text_regions(
                 source_lang=source_lang,
                 visual_hash=visual_hash,
                 metadata={"lines": len(members)},
+                polygons=tuple(
+                    polygon for member in members for polygon in member.polygons
+                ),
             )
         )
 
@@ -921,6 +1022,14 @@ def _looks_like_cjk_text(regions: list[TextRegion]) -> bool:
         ):
             return True
     return False
+
+
+def _contains_japanese_kana(regions: list[TextRegion]) -> bool:
+    return any(
+        0x3040 <= ord(char) <= 0x30FF or 0xFF66 <= ord(char) <= 0xFF9F
+        for region in regions
+        for char in region.text
+    )
 
 
 def _score_regions(regions: list[TextRegion]) -> float:

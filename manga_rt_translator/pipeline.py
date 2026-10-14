@@ -5,7 +5,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable
 
 from manga_rt_translator.cache import TranslationMemory, normalize_text
@@ -15,6 +15,11 @@ from manga_rt_translator.diff import FrameDiffer
 from manga_rt_translator.glossary import Glossary
 from manga_rt_translator.image_hash import crop_image
 from manga_rt_translator.models import Frame, OverlayItem, Rect, TextRegion
+from manga_rt_translator.overlay_background import (
+    detect_speech_bubble_bounds,
+    inpaint_text_background,
+    sample_background_color,
+)
 from manga_rt_translator.ocr import OcrEngine
 from manga_rt_translator.overlay import Overlay
 from manga_rt_translator.text_regions import TextRegionDetector
@@ -31,6 +36,8 @@ class PipelineStats:
     translate_calls: int = 0
     last_error: str = ""
     stale_results: int = 0
+    last_translation_ms: float = 0.0
+    last_translated_regions: int = 0
 
 
 @dataclass
@@ -61,6 +68,9 @@ class MangaTranslationPipeline:
     _translate_executor: "ThreadPoolExecutor | None" = field(
         default=None, init=False, repr=False
     )
+    _retired_translate_executors: list[ThreadPoolExecutor] = field(
+        default_factory=list, init=False, repr=False
+    )
     _items_lock: threading.RLock = field(
         default_factory=threading.RLock, init=False, repr=False
     )
@@ -69,6 +79,15 @@ class MangaTranslationPipeline:
     _in_flight: set[tuple[int, str]] = field(default_factory=set, init=False, repr=False)
     _futures: dict[Future, WorkToken] = field(default_factory=dict, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _replacement_generation: int | None = field(default=None, init=False, repr=False)
+    _staged_items: dict[int, list[OverlayItem]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    @property
+    def has_pending_translations(self) -> bool:
+        with self.view.lock:
+            return any(not future.done() for future in self._futures)
 
     def run(self, stop_event: threading.Event | None = None) -> None:
         stop_event = stop_event or threading.Event()
@@ -95,9 +114,17 @@ class MangaTranslationPipeline:
 
     def _process_frame(self, frame: Frame, *, force: bool, token: WorkToken) -> list[OverlayItem]:
         token.check()
+        set_viewport = getattr(self.overlay, "set_capture_viewport", None)
+        if callable(set_viewport):
+            set_viewport(frame.capture_viewport)
+        if frame.capture_lost:
+            self.discard_obsolete(clear_items=True)
+            return []
         self.stats.frames_seen += 1
         if force:
+            self._begin_replacement(token)
             self.differ = FrameDiffer(self.config.diff)
+            self.differ.prime(frame)
             rois = [Rect(0, 0, frame.image.shape[1], frame.image.shape[0])]
         else:
             rois = self.differ.update(frame)
@@ -122,7 +149,12 @@ class MangaTranslationPipeline:
         union = rois[0]
         for roi in rois[1:]:
             union = union.union(roi)
-        if not force and union.area > frame_area * 0.45 and self.active_items:
+        if (
+            not force
+            and not frame.dirty_rects_stable
+            and union.area > frame_area * 0.45
+            and self.active_items
+        ):
             self._fade_active_items()
             self._publish([], token)
             return list(self.active_items)
@@ -143,6 +175,24 @@ class MangaTranslationPipeline:
         token.check()
         if not force:
             regions = _filter_text_regions(regions, frame.image.shape[1], frame.image.shape[0])
+        for region in regions:
+            region.metadata["background_color"] = sample_background_color(
+                frame.image, region.bbox
+            )
+            bubble_bounds = detect_speech_bubble_bounds(
+                frame.image,
+                region.bbox,
+                region.metadata["background_color"],
+            )
+            if bubble_bounds is not None:
+                region.metadata["display_bbox"] = bubble_bounds
+            inpainted = inpaint_text_background(
+                frame.image,
+                region.bbox,
+                polygons=region.polygons,
+            )
+            if inpainted is not None:
+                region.metadata["background_rect"], region.metadata["background_patch"] = inpainted
         self.stats.ocr_regions += len(regions)
 
         valid_regions = [region for region in regions if region.text.strip()]
@@ -156,6 +206,11 @@ class MangaTranslationPipeline:
                     source_text=region.text,
                     confidence=region.confidence,
                     expires_at=now + min(20, self.config.overlay.ttl_seconds),
+                    visual_hash=region.visual_hash,
+                    background_color=region.metadata.get("background_color"),
+                    background_patch=region.metadata.get("background_patch"),
+                    background_rect=region.metadata.get("background_rect"),
+                    display_bbox=region.metadata.get("display_bbox"),
                 )
                 for region in valid_regions
             ]
@@ -163,16 +218,37 @@ class MangaTranslationPipeline:
 
         new_items = self._translate_regions(valid_regions, token)
         items_to_add = [item for item in new_items if item is not None]
-        self._publish(items_to_add, token)
+        if items_to_add or (frame.dirty_rects_stable and valid_regions):
+            self._publish(items_to_add, token)
+        elif not valid_regions:
+            # A forced viewport replacement that genuinely contains no text
+            # must still finish, otherwise a suspended old generation would
+            # remain hidden forever.
+            self._publish([], token)
         return list(self.active_items)
 
     def _publish(self, items: list[OverlayItem], token: WorkToken) -> None:
         def publish() -> None:
-            self._upsert_overlay_items(items)
+            if self._replacement_generation == token.generation:
+                staged = self._staged_items.pop(token.generation, [])
+                self.active_items = self._dedupe_items([*staged, *items])
+                self._replacement_generation = None
+            else:
+                self._upsert_overlay_items(items)
             self.overlay.update(list(self.active_items))
         token.commit(publish)
 
-    def discard_obsolete(self) -> None:
+    def _begin_replacement(self, token: WorkToken) -> None:
+        with self._items_lock:
+            self._replacement_generation = token.generation
+            self._staged_items = {token.generation: []}
+
+    def _stage_replacement(self, items: list[OverlayItem], token: WorkToken) -> None:
+        with self._items_lock:
+            if self._replacement_generation == token.generation:
+                self._staged_items[token.generation] = self._dedupe_items(items)
+
+    def discard_obsolete(self, *, clear_items: bool = True) -> None:
         with self.view.lock:
             for future, token in list(self._futures.items()):
                 if not token.current():
@@ -180,9 +256,41 @@ class MangaTranslationPipeline:
             self._in_flight = {
                 key for key in self._in_flight if key[0] == self.view.generation
             }
-            with self._items_lock:
-                self.active_items = []
-            self.overlay.update([])
+            self._replacement_generation = None
+            self._staged_items.clear()
+            if clear_items:
+                with self._items_lock:
+                    self.active_items = []
+                self.overlay.update([])
+
+    def shift_viewport_items(
+        self, dy: int, width: int, height: int, dx: int = 0
+    ) -> None:
+        """Keep translated bubbles attached to their page content during scroll."""
+        if (dx == 0 and dy == 0) or width <= 0 or height <= 0:
+            return
+        viewport = Rect(0, 0, width, height)
+
+        def shifted(rect: Rect | None) -> Rect | None:
+            if rect is None:
+                return None
+            return Rect(rect.x + dx, rect.y + dy, rect.width, rect.height)
+
+        with self._items_lock:
+            moved: list[OverlayItem] = []
+            for item in self.active_items:
+                bbox = shifted(item.bbox)
+                if bbox is None or not bbox.intersects(viewport):
+                    continue
+                moved.append(
+                    replace(
+                        item,
+                        bbox=bbox,
+                        display_bbox=shifted(item.display_bbox),
+                        background_rect=shifted(item.background_rect),
+                    )
+                )
+            self.active_items = moved
 
     def _fade_active_items(self, seconds: float = 1.2) -> None:
         now = time.time()
@@ -224,6 +332,10 @@ class MangaTranslationPipeline:
                     source_lang=region.source_lang,
                     visual_hash=region.visual_hash,
                     metadata=dict(region.metadata),
+                    polygons=tuple(
+                        tuple((rect.x + x, rect.y + y) for x, y in polygon)
+                        for polygon in region.polygons
+                    ),
                 )
                 for region in cached
             )
@@ -258,6 +370,10 @@ class MangaTranslationPipeline:
                         source_lang=region.source_lang,
                         visual_hash=region.visual_hash,
                         metadata=dict(region.metadata),
+                        polygons=tuple(
+                            tuple((x - origin.x, y - origin.y) for x, y in polygon)
+                            for polygon in region.polygons
+                        ),
                     )
                     for region in parts
                 ]
@@ -290,7 +406,7 @@ class MangaTranslationPipeline:
 
         for index, region in enumerate(regions):
             source_lang = region.source_lang or default_source
-            pair = f"{source_lang}->{target_lang}"
+            pair = self._language_pair(source_lang, target_lang)
             visual_hit = self.memory.get_visual(region.visual_hash, pair)
             if visual_hit:
                 self.stats.cache_hits += 1
@@ -325,7 +441,18 @@ class MangaTranslationPipeline:
                 for index in pending:
                     if regions[index].visual_hash:
                         self._in_flight.add((token.generation, regions[index].visual_hash))
+                cached_items = [
+                    item
+                    for item in self._build_items(
+                        regions, results, provisional_for_misses=False
+                    )
+                    if item is not None
+                ]
+                if self._replacement_generation == token.generation:
+                    self._stage_replacement(cached_items, token)
                 self._dispatch_translation(regions, pending_by_lang, target_lang, token)
+                if self._replacement_generation == token.generation:
+                    return []
             return self._build_items(regions, results, provisional_for_misses=False)
 
         if misses_by_lang:
@@ -357,6 +484,11 @@ class MangaTranslationPipeline:
                             source_text=region.text,
                             confidence=region.confidence,
                             expires_at=now + min(12, self.config.overlay.ttl_seconds),
+                            visual_hash=region.visual_hash,
+                            background_color=region.metadata.get("background_color"),
+                            background_patch=region.metadata.get("background_patch"),
+                            background_rect=region.metadata.get("background_rect"),
+                            display_bbox=region.metadata.get("display_bbox"),
                         )
                     )
                 else:
@@ -369,6 +501,11 @@ class MangaTranslationPipeline:
                     source_text=region.text,
                     confidence=region.confidence,
                     expires_at=now + self.config.overlay.ttl_seconds,
+                    visual_hash=region.visual_hash,
+                    background_color=region.metadata.get("background_color"),
+                    background_patch=region.metadata.get("background_patch"),
+                    background_rect=region.metadata.get("background_rect"),
+                    display_bbox=region.metadata.get("display_bbox"),
                 )
             )
         if len(self.context_lines) > 20:
@@ -385,6 +522,7 @@ class MangaTranslationPipeline:
         """Run the provider chain on the cache misses and persist results.
         Called on the background thread in async mode."""
         translated: dict[int, str] = {}
+        history_entries: list[tuple[str, str, str, str]] = []
         for source_lang, indices in misses_by_lang.items():
             if token:
                 token.check()
@@ -414,7 +552,7 @@ class MangaTranslationPipeline:
             if token:
                 token.check()
             for index, result in zip(indices, batch):
-                pair = f"{source_lang}->{target_lang}"
+                pair = self._language_pair(source_lang, target_lang)
                 # Echo is a display fallback, not a translation. Persisting it
                 # poisons the translation memory with source-language text and
                 # prevents a later provider retry from becoming authoritative.
@@ -439,6 +577,9 @@ class MangaTranslationPipeline:
                         language_pair=pair,
                         bbox=regions[index].bbox.as_tuple(),
                     )
+                    history_entries.append(
+                        (regions[index].text, result.text, pair, result.provider)
+                    )
                 if result.provider == "echo" and not isinstance(
                     self.translator, EchoTranslator
                 ):
@@ -446,7 +587,13 @@ class MangaTranslationPipeline:
                     continue
                 self.stats.last_error = ''
                 translated[index] = result.text
+        self.memory.record_history_batch(history_entries)
         return translated
+
+    def _language_pair(self, source_lang: str, target_lang: str) -> str:
+        pair = f"{source_lang}->{target_lang}"
+        scope = self.glossary.cache_scope
+        return f"{scope}|{pair}" if scope else pair
 
     def _dispatch_translation(
         self,
@@ -474,6 +621,18 @@ class MangaTranslationPipeline:
             self._futures[future] = token
             future.add_done_callback(self._translation_finished)
 
+    def replace_translator(self, translator: Translator) -> None:
+        with self.view.lock:
+            if self._closed:
+                raise RuntimeError("Translation pipeline is closed")
+            executor = self._translate_executor
+            if executor is not None:
+                if any(not future.done() for future in self._futures):
+                    self._retired_translate_executors.append(executor)
+                executor.shutdown(wait=False, cancel_futures=True)
+                self._translate_executor = None
+            self.translator = translator
+
     def _translation_finished(self, future: Future) -> None:
         with self.view.lock:
             self._futures.pop(future, None)
@@ -490,6 +649,8 @@ class MangaTranslationPipeline:
             token.check()
             translated = self._translate_misses(regions, misses_by_lang, target_lang, token)
             elapsed = (time.time() - t0) * 1000
+            self.stats.last_translation_ms = elapsed
+            self.stats.last_translated_regions = len(translated)
             results: list[str | None] = [None] * len(regions)
             for index, text in translated.items():
                 results[index] = text
@@ -514,10 +675,13 @@ class MangaTranslationPipeline:
         with self.view.lock:
             self._closed = True
             self.view.close()
-            executor = self._translate_executor
-        if executor is not None:
-            executor.shutdown(wait=wait, cancel_futures=True)
+            executors = list(self._retired_translate_executors)
+            self._retired_translate_executors.clear()
+            if self._translate_executor is not None:
+                executors.append(self._translate_executor)
             self._translate_executor = None
+        for executor in executors:
+            executor.shutdown(wait=wait, cancel_futures=True)
 
     def _remove_items_overlapping(self, rois: list[Rect]) -> None:
         with self._items_lock:
@@ -556,16 +720,39 @@ class MangaTranslationPipeline:
                     bool(new_item.source_text) and new_item.text == new_item.source_text
                 )
                 if is_provisional and any(
-                    item.bbox.intersects(new_item.bbox)
+                    self._same_overlay_item(item, new_item)
                     and not (
                         bool(item.source_text) and item.text == item.source_text
                     )
                     for item in live
                 ):
                     continue
-                live = [item for item in live if not item.bbox.intersects(new_item.bbox)]
+                live = [
+                    item for item in live
+                    if not self._same_overlay_item(item, new_item)
+                ]
                 live.append(new_item)
-            self.active_items = live
+            self.active_items = self._dedupe_items(live)
+
+    @staticmethod
+    def _same_overlay_item(left: OverlayItem, right: OverlayItem) -> bool:
+        if left.visual_hash and right.visual_hash:
+            return left.visual_hash == right.visual_hash
+        if left.source_text and right.source_text:
+            if normalize_text(left.source_text) == normalize_text(right.source_text):
+                return left.bbox.intersects(right.bbox)
+        return left.bbox.intersects(right.bbox)
+
+    @classmethod
+    def _dedupe_items(cls, items: list[OverlayItem]) -> list[OverlayItem]:
+        result: list[OverlayItem] = []
+        for item in items:
+            result = [
+                existing for existing in result
+                if not cls._same_overlay_item(existing, item)
+            ]
+            result.append(item)
+        return result
 
 
 def _filter_text_regions(

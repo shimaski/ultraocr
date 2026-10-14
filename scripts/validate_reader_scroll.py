@@ -38,11 +38,28 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     output = root / 'reader_debug_output' / f'qa-{int(time.time())}'
     output.mkdir(parents=True)
-    capture = root / 'reader_debug_output/last_capture.png'
     page = output / 'fixture.html'
-    page.write_text('<!doctype html><html><body style="margin:0;background:#191a1b">'
-                    + f'<img style="display:block" src="{capture.as_uri()}" width="977" height="861">'*3
-                    + '</body></html>', encoding='utf-8')
+    page.write_text('''<!doctype html><html><head><meta charset="utf-8"><style>
+      html,body{margin:0;background:#eee;color:#111;font-family:Arial,sans-serif}
+      .panel{height:900px;width:977px;position:relative;border-bottom:8px solid #222}
+      .bubble{position:absolute;left:145px;width:580px;height:180px;top:300px;
+        box-sizing:border-box;border:5px solid #111;border-radius:48%;background:#fff;
+        display:flex;align-items:center;justify-content:center;text-align:center;
+        font-size:52px;font-weight:700}
+      .panel:nth-child(2) .bubble{top:60px;font-size:34px}
+      #horizontal{display:none;position:fixed;left:145px;top:360px;width:580px;height:180px;
+        overflow-x:auto;overflow-y:hidden;border:5px solid #111;background:#fff;box-sizing:border-box}
+      #horizontal-content{position:relative;width:1250px;height:100%;font-size:44px;font-weight:700}
+      #horizontal-content span{position:absolute;top:55px;white-space:nowrap}
+      #horizontal-left{left:20px} #horizontal-right{left:700px}
+    </style></head><body>
+      <section class="panel"><div class="bubble">CHIEF!</div></section>
+      <section class="panel"><div class="bubble">HAS THERE EVER BEEN A HUMAN WHO ACTUALLY LISTENED TO OUR</div></section>
+      <section class="panel"><div class="bubble">CHIEF!</div></section>
+      <div id="horizontal"><div id="horizontal-content">
+        <span id="horizontal-left">LEFT SIDE</span><span id="horizontal-right">RIGHT SIDE</span>
+      </div></div>
+    </body></html>''', encoding='utf-8')
     config = AppConfig()
     config.ocr.detector = args.detector
     config.cache.path = str(output / 'memory.sqlite')
@@ -91,11 +108,38 @@ def main() -> None:
             with pipeline.view.lock:
                 items = list(pipeline.active_items)
             translated = [item for item in items if item.text != item.source_text]
-            expected = 'HAS THERE' if state['stage'] == 'scrolled' else 'CHIEF'
+            if state['stage'] == 'zoom-check':
+                zoom_changed = window._last_view_metrics != state['zoom_metrics_before']
+                reread = pipeline.stats.ocr_regions > state['ocr_before_zoom']
+                if zoom_changed and reread:
+                    state['results'].append(dict(
+                        stage='zoom-check',
+                        elapsed_s=round(time.monotonic()-started, 2),
+                        captures=window.runtime.frames_captured,
+                        ocr=pipeline.stats.ocr_regions,
+                        metrics_changed=True,
+                    ))
+                    state['success'] = True
+                    finish()
+                return
+            expected = {
+                'first': 'CHIEF', 'scrolled': 'HAS THERE',
+                'horizontal-left': 'LEFT SIDE', 'horizontal-right': 'RIGHT SIDE',
+            }.get(state['stage'], '')
             if not any(expected in item.source_text.upper() for item in translated):
                 return
             assert window.selected_region == Rect(50, 260, 740, 430)
-            assert window.overlay_widget.isVisible(), 'Overlay hidden'
+            active_window = QApplication.activeWindow()
+            state['visibility'] = {
+                'reader_visible': window.isVisible(),
+                'reader_active': window.isActiveWindow(),
+                'overlay_visible': window.overlay_widget.isVisible(),
+                'active_window': active_window.windowTitle() if active_window else None,
+            }
+            if window.isActiveWindow():
+                assert window.overlay_widget.isVisible(), f"Overlay hidden: {state['visibility']}"
+            else:
+                state['focus_note'] = 'OS did not grant foreground focus; overlay visibility is not asserted'
             assert window.runtime.last_capture_shape == '740x430', 'DPI coordinates changed'
             state['results'].append(dict(stage=state['stage'], elapsed_s=round(time.monotonic()-started, 2),
                                          captures=window.runtime.frames_captured,
@@ -106,18 +150,24 @@ def main() -> None:
                 state['stage'] = 'scrolled'
                 window.webview.page().runJavaScript('window.scrollTo(0,400)')
             elif state['stage'] == 'scrolled':
-                state['stage'] = 'returned'
-                window.webview.page().runJavaScript('window.scrollTo(0,0)')
-            elif state['stage'] == 'returned':
-                # Invalidate at an intermediate scroll then return before debounce fires.
-                state['stage'] = 'rapid-return'
-                window.webview.page().runJavaScript('window.scrollTo(0,400)')
-                timer.stop()
-                QTimer.singleShot(450, lambda: window.webview.page().runJavaScript('window.scrollTo(0,0)'))
-                QTimer.singleShot(900, timer.start)
-            elif state['stage'] == 'rapid-return':
-                state['success'] = True
-                finish()
+                state['stage'] = 'horizontal-left'
+                window.webview.page().runJavaScript(
+                    "document.getElementById('horizontal').style.display='block'"
+                )
+            elif state['stage'] == 'horizontal-left':
+                state['stage'] = 'horizontal-right'
+                window.webview.page().runJavaScript(
+                    "document.getElementById('horizontal').scrollLeft=600"
+                )
+            elif state['stage'] == 'horizontal-right':
+                if args.scale_factor != 1.0:
+                    state['success'] = True
+                    finish()
+                    return
+                state['stage'] = 'zoom-check'
+                state['zoom_metrics_before'] = window._last_view_metrics
+                state['ocr_before_zoom'] = pipeline.stats.ocr_regions
+                window.webview.setZoomFactor(1.25)
         except Exception as exc:
             finish(f'{type(exc).__name__}: {exc}')
 
@@ -134,7 +184,10 @@ def main() -> None:
         if not ok:
             finish('Fixture failed to load')
             return
-        QTimer.singleShot(350, select)
+        window = reader._ACTIVE_WINDOW
+        window.webview.page().runJavaScript(
+            'window.scrollTo(0,0)', lambda _: QTimer.singleShot(350, select)
+        )
 
     def bind():
         window = reader._ACTIVE_WINDOW

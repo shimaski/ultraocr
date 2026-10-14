@@ -5,7 +5,19 @@ from manga_rt_translator.reader import (
     _fit_rect,
     _place_without_overlap,
     _rects_overlap,
+    _scale_capture_rect,
 )
+from manga_rt_translator.models import Rect
+
+
+def test_physical_capture_box_scales_to_logical_overlay_coordinates():
+    scaled = _scale_capture_rect(Rect(x=150, y=75, width=300, height=90), 1.5)
+    assert scaled == Rect(x=100, y=50, width=200, height=60)
+
+
+def test_capture_scale_does_not_shrink_logical_coordinates():
+    rect = Rect(x=120, y=60, width=80, height=30)
+    assert _scale_capture_rect(rect, 1.0) == rect
 
 
 def test_long_portuguese_text_expands_horizontally():

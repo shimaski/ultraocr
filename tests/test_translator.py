@@ -5,6 +5,7 @@ import pytest
 from manga_rt_translator.config import load_config
 from manga_rt_translator.glossary import Glossary
 from manga_rt_translator.translator import (
+    ArgosLocalTranslator,
     EchoTranslator,
     FallbackChain,
     GeminiTranslator,
@@ -62,6 +63,94 @@ def test_create_translator_respects_echo_flag():
     config = load_config(None)
     translator = create_translator(config, echo=True)
     assert isinstance(translator, EchoTranslator)
+
+
+def test_argos_translator_maps_japanese_and_brazilian_portuguese(monkeypatch):
+    calls = []
+
+    class FakeLanguage:
+        def __init__(self, code):
+            self.code = code
+
+        def get_translation(self, target):
+            calls.append((self.code, target.code))
+            return FakeTranslation()
+
+    class FakeTranslation:
+        def translate(self, text):
+            return f"BR: {text}"
+
+    languages = [FakeLanguage("ja"), FakeLanguage("pb")]
+    module = type("FakeArgosTranslate", (), {"get_installed_languages": lambda: languages})
+    monkeypatch.setattr(
+        "manga_rt_translator.translator.importlib.import_module",
+        lambda name: module,
+    )
+    translator = ArgosLocalTranslator()
+    result = translator.translate("  こんにちは  ", "japan", "pt-BR", Glossary.default())
+    assert result.text == "BR: こんにちは"
+    assert result.provider == "argos"
+    assert calls == [("ja", "pb")]
+
+
+def test_argos_translator_uses_english_pivot_for_japanese_to_brazilian_portuguese(monkeypatch):
+    calls = []
+
+    class FakeTranslation:
+        def __init__(self, source, target):
+            self.source = source
+            self.target = target
+
+        def translate(self, text):
+            calls.append((self.source, self.target, text))
+            return f"{self.target}:{text}"
+
+    class FakeLanguage:
+        def __init__(self, code):
+            self.code = code
+
+        def get_translation(self, target):
+            pair = (self.code, target.code)
+            if pair not in {("ja", "en"), ("en", "pb")}:
+                return None
+            return FakeTranslation(*pair)
+
+    languages = [FakeLanguage(code) for code in ("ja", "en", "pb")]
+    module = type("FakeArgosTranslate", (), {"get_installed_languages": lambda: languages})
+    monkeypatch.setattr(
+        "manga_rt_translator.translator.importlib.import_module",
+        lambda name: module,
+    )
+
+    result = ArgosLocalTranslator().translate(
+        "こんにちは", "japan", "pt-BR", Glossary.default()
+    )
+
+    assert result.text == "pb:en:こんにちは"
+    assert result.provider == "argos"
+    assert calls == [("ja", "en", "こんにちは"), ("en", "pb", "en:こんにちは")]
+
+
+def test_argos_translator_reports_missing_models_without_network(monkeypatch):
+    class FakeTranslate:
+        @staticmethod
+        def get_installed_languages():
+            return []
+
+    monkeypatch.setattr(
+        "manga_rt_translator.translator.importlib.import_module",
+        lambda name: FakeTranslate,
+    )
+    ok, message = ArgosLocalTranslator().check_health()
+    assert not ok
+    assert "en -> pb" in message
+    assert "nenhum" in message
+
+
+def test_create_translator_supports_argos_offline():
+    config = load_config(None)
+    config.translation.provider = "argos"
+    assert isinstance(create_translator(config), ArgosLocalTranslator)
 
 
 def test_create_translator_defaults_to_google_chain_with_echo_last():

@@ -29,14 +29,15 @@ ignore_top_pixels = 120
 det_model = "mobile"
 # Recognition model: mobile (fast) | server (better on stylized comic fonts)
 rec_model = "mobile"
-# Text detector: paddle (recommended, best quality today) | comic
-# (ONNX comic-text-detector via GPU DirectML — faster, calibrated for
-# handwritten strokes: threshold 0.25 + close-box merging)
-detector = "comic"
+# Text detector: paddle (recommended) | comic (experimental, downloads an
+# additional ~90 MB ONNX model; may be slower or less accurate on some pages)
+detector = "paddle"
+# Large OCR inputs are reduced proportionally; smaller crops remain unchanged.
+max_input_side = 640
 
 [translation]
 target_lang = "pt-BR"
-# Providers: google (free, no key) | deepl (needs deepl_api_key) | echo (debug)
+# Providers: google | gemini | deepl | libre | argos (offline models) | echo (debug)
 provider = "google"
 # deepl_api_key = ""
 # deepl_free = true

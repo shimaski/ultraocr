@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from manga_rt_translator.app_runtime import TranslationSession
+from manga_rt_translator.argos_models import install_model_route, list_installed_models
 from manga_rt_translator.capture.windows_windows import find_window, list_visible_windows
 from manga_rt_translator.config import AppConfig, load_config
 from manga_rt_translator.glossary import Glossary
@@ -24,6 +25,14 @@ def main(argv: list[str] | None = None) -> int:
         return reader_command(args)
     if args.command == "run":
         return run_command(args)
+    if args.command == "argos-models":
+        if args.action == "status":
+            return list_installed_models()
+        return install_model_route(
+            args.source,
+            args.target,
+            confirm=_confirm_argos_install,
+        )
     parser.print_help()
     return 1
 
@@ -42,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--provider",
         default=None,
-        choices=["google", "deepl", "echo"],
+        choices=["google", "deepl", "gemini", "libre", "argos", "echo"],
         help="Translation provider (default comes from config).",
     )
     run.add_argument(
@@ -54,6 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--gemini-api-key",
         default=None,
         help="Gemini API key (required when --provider gemini).",
+    )
+    run.add_argument(
+        "--libre-api-key",
+        default=None,
+        help="LibreTranslate API key (optional when --provider libre).",
     )
     run.add_argument("--source-lang", default=None, help="OCR source language.")
     run.add_argument(
@@ -74,6 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("list-windows", help="List visible windows on Windows.")
+
+    argos = subparsers.add_parser(
+        "argos-models", help="List or install local Argos translation models."
+    )
+    argos_actions = argos.add_subparsers(dest="action", required=True)
+    argos_actions.add_parser("status", help="List installed translation pairs.")
+    install = argos_actions.add_parser("install", help="Install a model route after confirmation.")
+    install.add_argument("--source", required=True, help="Source language, e.g. en or japan.")
+    install.add_argument("--target", default="pt-BR", help="Target language (default: pt-BR).")
 
     ui = subparsers.add_parser("ui", help="Open a small control panel.")
     ui.add_argument("--config", default=None, help="Path to config TOML.")
@@ -157,6 +180,8 @@ def apply_cli_overrides(config: AppConfig, args: argparse.Namespace) -> None:
         config.translation.deepl_api_key = args.deepl_api_key
     if getattr(args, "gemini_api_key", None):
         config.translation.gemini_api_key = args.gemini_api_key
+    if getattr(args, "libre_api_key", None):
+        config.translation.libre_api_key = args.libre_api_key
     if args.source_lang:
         config.ocr.source_lang = args.source_lang
     if getattr(args, "extra_langs", None) is not None:
@@ -211,6 +236,13 @@ def reader_command(args: argparse.Namespace) -> int:
 def _safe_console_text(text: str) -> str:
     encoding = getattr(__import__("sys").stdout, "encoding", None) or "utf-8"
     return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def _confirm_argos_install(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() in {"s", "sim", "y", "yes"}
+    except EOFError:
+        return False
 
 
 def _start_stats_writer(

@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import time
+import logging
+import platform
 from dataclasses import dataclass
 from typing import Iterable
 
 from manga_rt_translator.config import OverlayConfig
-from manga_rt_translator.models import OverlayItem, Rect
+from manga_rt_translator.capture.windows_capture_affinity import (
+    exclude_window_from_dxgi_capture,
+)
+from manga_rt_translator.models import CaptureViewport, OverlayItem, Rect
+from manga_rt_translator.overlay_background import foreground_color
+from manga_rt_translator.overlay_geometry import logical_capture_rect
 
 
 class Overlay:
+    def set_capture_viewport(self, viewport: CaptureViewport | None) -> None:
+        return None
+
     def update(self, items: Iterable[OverlayItem]) -> None:
         raise NotImplementedError
 
@@ -52,18 +62,20 @@ def create_overlay(config: OverlayConfig, enabled: bool = True) -> Overlay:
 
 
 def create_qt_overlay(config: OverlayConfig) -> Overlay:
-    from PySide6.QtCore import QObject, Qt, Signal, Slot
-    from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+    from PySide6.QtCore import QObject, QRectF, Qt, Signal, Slot
+    from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
     from PySide6.QtWidgets import QApplication, QWidget
 
     class OverlayBridge(QObject):
         items_changed = Signal(object)
+        viewport_changed = Signal(object)
         stop_requested = Signal()
 
     class OverlayWidget(QWidget):
         def __init__(self) -> None:
             super().__init__()
             self.items: list[OverlayItem] = []
+            self.capture_scale = 1.0
             self.setWindowTitle("Manga Real-Time Translator Overlay")
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint
@@ -82,6 +94,49 @@ def create_qt_overlay(config: OverlayConfig) -> Overlay:
                 self.resize(1920, 1080)
 
         @Slot(object)
+        def set_capture_viewport(self, viewport: CaptureViewport | None) -> None:
+            if viewport is None:
+                self.capture_scale = 1.0
+                screen = QApplication.primaryScreen()
+                if screen is not None:
+                    self.setGeometry(screen.geometry())
+                self.update()
+                return
+
+            screens = QApplication.screens()
+            screen = next(
+                (
+                    candidate
+                    for candidate in screens
+                    if viewport.monitor_device_name
+                    and candidate.name().casefold()
+                    == viewport.monitor_device_name.casefold()
+                ),
+                None,
+            )
+            if screen is None and 0 <= viewport.monitor_index < len(screens):
+                screen = screens[viewport.monitor_index]
+            if screen is None:
+                screen = QApplication.primaryScreen()
+            if screen is None:
+                return
+
+            self.capture_scale = max(1.0, float(screen.devicePixelRatio()))
+            geometry = screen.geometry()
+            logical_geometry = logical_capture_rect(
+                viewport,
+                Rect(geometry.x(), geometry.y(), geometry.width(), geometry.height()),
+                self.capture_scale,
+            )
+            self.setGeometry(
+                logical_geometry.x,
+                logical_geometry.y,
+                logical_geometry.width,
+                logical_geometry.height,
+            )
+            self.update()
+
+        @Slot(object)
         def set_items(self, items: list[OverlayItem]) -> None:
             now = time.time()
             self.items = [
@@ -95,23 +150,75 @@ def create_qt_overlay(config: OverlayConfig) -> Overlay:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            font = QFont(config.font_family, config.font_size)
+            scale = self.capture_scale
+            if scale != 1.0:
+                painter.scale(1 / scale, 1 / scale)
+            font = QFont(config.font_family, max(1, round(config.font_size * scale)))
             font.setBold(True)
             painter.setFont(font)
 
             for item in self.items:
-                rect = _fit_rect(item.bbox, self.width(), self.height())
+                patch = item.background_patch
+                patch_rect = item.background_rect
+                if patch is None or patch_rect is None or item.text == item.source_text:
+                    continue
+                image = QImage(
+                    patch.data,
+                    patch.shape[1],
+                    patch.shape[0],
+                    int(patch.strides[0]),
+                    QImage.Format.Format_RGB888,
+                ).copy()
+                painter.drawImage(
+                    QRectF(
+                        patch_rect.x,
+                        patch_rect.y,
+                        patch_rect.width,
+                        patch_rect.height,
+                    ),
+                    image,
+                )
+
+            for item in self.items:
+                rect = _fit_rect(
+                    item.bbox,
+                    max(1, round(self.width() * scale)),
+                    max(1, round(self.height() * scale)),
+                )
                 bubble = QPainterPath()
                 bubble.addRoundedRect(rect.x, rect.y, rect.width, rect.height, 10, 10)
-                shadow = QColor(0, 0, 0, 48)
-                painter.fillPath(bubble.translated(0, 2), shadow)
+                has_restored_background = (
+                    item.background_patch is not None and item.text != item.source_text
+                )
+                if not has_restored_background:
+                    painter.fillPath(bubble.translated(0, 2), QColor(0, 0, 0, 48))
 
-                bg = QColor(255, 252, 245, int(255 * config.opacity))
-                fg = QColor(24, 20, 18, 245)
-                border = QColor(36, 31, 28, 110)
-                painter.setPen(QPen(border, 1.2))
+                sampled_background = item.background_color
+                bg = (
+                    QColor(
+                        *sampled_background,
+                        int(255 * config.opacity)
+                        if has_restored_background
+                        else 255,
+                    )
+                    if sampled_background is not None
+                    else QColor(
+                        255,
+                        252,
+                        245,
+                        int(255 * config.opacity),
+                    )
+                )
+                fg = QColor(*foreground_color(sampled_background), 245)
+                border = (
+                    QColor(36, 31, 28, 110)
+                    if fg.red() < 128
+                    else QColor(245, 245, 245, 150)
+                )
                 painter.fillPath(bubble, bg)
-                painter.drawPath(bubble)
+                if not has_restored_background:
+                    painter.setPen(QPen(border, 1.2))
+                    painter.drawPath(bubble)
                 painter.setPen(fg)
                 painter.drawText(
                     rect.x + 10,
@@ -127,12 +234,35 @@ def create_qt_overlay(config: OverlayConfig) -> Overlay:
             self.app = QApplication.instance() or QApplication([])
             self.bridge = OverlayBridge()
             self.widget = OverlayWidget()
+            self._capture_viewport: CaptureViewport | None = None
+            self.capture_exclusion: tuple[bool, str, int] | None = None
             self.bridge.items_changed.connect(self.widget.set_items)
+            self.bridge.viewport_changed.connect(self.widget.set_capture_viewport)
             self.bridge.stop_requested.connect(self.app.quit)
             self.widget.show()
+            if platform.system().lower() == "windows":
+                self.capture_exclusion = exclude_window_from_dxgi_capture(
+                    int(self.widget.winId())
+                )
+                excluded, method, error = self.capture_exclusion
+                if not excluded:
+                    logging.getLogger(__name__).warning(
+                        "Could not exclude translation overlay from DXGI capture "
+                        "(method=%s, WinError=%s).",
+                        method,
+                        error,
+                    )
 
         def update(self, items: Iterable[OverlayItem]) -> None:
             self.bridge.items_changed.emit(list(items))
+
+        def set_capture_viewport(
+            self, viewport: CaptureViewport | None
+        ) -> None:
+            if viewport == self._capture_viewport:
+                return
+            self._capture_viewport = viewport
+            self.bridge.viewport_changed.emit(viewport)
 
         def run_forever(self) -> int:
             return int(self.app.exec())

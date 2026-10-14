@@ -54,6 +54,8 @@ class OcrConfig:
     # A 2x retry helps small stylized text, but repeating a full viewport costs
     # several seconds. Only tight crops below this area may be retried.
     upscale_retry_max_pixels: int = 250_000
+    # Cap large OCR crops before inference; geometry is mapped to the source frame.
+    max_input_side: int = 640
 
 
 @dataclass

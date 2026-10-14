@@ -30,9 +30,25 @@ class FrameDiffer:
         # overlay bubbles that no longer sit on their content.
         self.last_tick_had_large_change = False
 
+    @property
+    def has_baseline(self) -> bool:
+        return self._previous is not None
+
     def update(self, frame: Frame) -> list[Rect]:
         height, width = frame.image.shape[:2]
         self.last_tick_had_large_change = False
+        if frame.dirty_rects_stable and frame.dirty_rects:
+            self._pending.clear()
+            self._cooldown_until = 0.0
+            self._previous = frame.image.copy()
+            rois = [
+                rect.expanded(self.config.roi_padding, width, height)
+                for rect in frame.dirty_rects
+                if rect.area > 0
+            ]
+            return merge_rects(rois, gap=max(4, self.config.roi_padding))[
+                : self.config.max_rois_per_tick
+            ]
         if frame.timestamp < self._cooldown_until:
             self._previous = frame.image.copy()
             return []
@@ -57,6 +73,13 @@ class FrameDiffer:
         ready = self._collect_ready(frame)
         self._previous = frame.image.copy()
         return ready[: self.config.max_rois_per_tick]
+
+    def prime(self, frame: Frame) -> None:
+        """Set a known full-frame baseline after an explicit viewport read."""
+        self._previous = frame.image.copy()
+        self._pending.clear()
+        self._cooldown_until = 0.0
+        self.last_tick_had_large_change = False
 
     def _diff_tiles(
         self,

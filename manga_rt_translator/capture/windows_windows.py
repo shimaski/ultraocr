@@ -23,6 +23,7 @@ class MonitorInfo:
     top: int
     right: int
     bottom: int
+    device_name: str = ""
 
     @property
     def width(self) -> int:
@@ -31,6 +32,16 @@ class MonitorInfo:
     @property
     def height(self) -> int:
         return max(0, self.bottom - self.top)
+
+
+class _MonitorInfoExW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+        ("szDevice", wintypes.WCHAR * 32),
+    ]
 
 
 def list_visible_windows() -> list[WindowInfo]:
@@ -98,12 +109,18 @@ def list_monitors() -> list[MonitorInfo]:
         lparam: int,
     ) -> bool:
         rect = rect_ptr.contents
+        details = _MonitorInfoExW()
+        details.cbSize = ctypes.sizeof(details)
+        device_name = ""
+        if user32.GetMonitorInfoW(hmonitor, ctypes.byref(details)):
+            device_name = details.szDevice
         monitors.append(
             MonitorInfo(
                 left=rect.left,
                 top=rect.top,
                 right=rect.right,
                 bottom=rect.bottom,
+                device_name=device_name,
             )
         )
         return True
@@ -113,6 +130,13 @@ def list_monitors() -> list[MonitorInfo]:
 
 
 def resolve_capture_region_for_window(window: WindowInfo) -> tuple[int, tuple[int, int, int, int]]:
+    monitor_index, region, _origin, _monitor = resolve_capture_geometry_for_window(window)
+    return monitor_index, region
+
+
+def resolve_capture_geometry_for_window(
+    window: WindowInfo,
+) -> tuple[int, tuple[int, int, int, int], tuple[int, int], MonitorInfo]:
     monitors = list_monitors()
     if not monitors:
         raise RuntimeError("Unable to enumerate monitors for capture.")
@@ -138,7 +162,23 @@ def resolve_capture_region_for_window(window: WindowInfo) -> tuple[int, tuple[in
         clipped.x2 - monitor.left,
         clipped.y2 - monitor.top,
     )
-    return best_index, region
+    return best_index, region, (clipped.x, clipped.y), monitor
+
+
+def monitor_for_output(output_idx: int) -> MonitorInfo:
+    monitors = list_monitors()
+    if output_idx < 0 or output_idx >= len(monitors):
+        raise RuntimeError(f"Display output {output_idx} is unavailable.")
+    return monitors[output_idx]
+
+
+def monitor_index_for_device_name(device_name: str) -> int:
+    wanted = device_name.rsplit("\\", 1)[-1].casefold()
+    for index, monitor in enumerate(list_monitors()):
+        candidate = monitor.device_name.rsplit("\\", 1)[-1].casefold()
+        if candidate == wanted:
+            return index
+    raise RuntimeError(f"Display {device_name!r} is unavailable for capture.")
 
 
 def find_window(

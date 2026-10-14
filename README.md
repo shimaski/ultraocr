@@ -32,11 +32,21 @@ Tradutor em tempo real de mangás/webtoons para desktop Windows. Captura a tela,
 
 O UltraOCR é um leitor de mangá/desktop que:
 
-1. **Captura** a região de leitura da tela (via DXGI/dxcam ou viewport Qt)
+1. **Captura** a janela do leitor por Windows Graphics Capture (WGC), com DXGI/dxcam e viewport Qt como fallback
 2. **Detecta** balões de texto com detecção ONNX (GPU) ou PaddleOCR
 3. **Reconhece** o texto via PaddleOCR (local, sem internet)
-4. **Traduz** o texto via Google Translate, Gemini, DeepL ou LibreTranslate
+4. **Traduz** o texto via Argos local ou Google Translate, Gemini, DeepL ou LibreTranslate
 5. **Renderiza** a tradução em português sobre o texto original em um overlay transparente
+
+Durante a rolagem, o overlay anterior é ocultado sem descartar seus dados. A
+nova geração substitui todos os balões de uma vez somente depois que OCR,
+cache e tradução terminam. Cada balão carrega um hash visual persistente para
+evitar duplicação, oscilação de posição e retradução desnecessária.
+
+Se a rolagem interromper OCR ou tradução, o leitor agenda uma releitura completa
+da viewport após estabilizar; quando nenhum trabalho foi interrompido, mantém a
+otimização incremental da faixa recém-exposta. Google, Gemini, DeepL e Libre
+podem ser trocados durante a sessão sem reiniciar a captura.
 
 O app não modifica o site original — tudo acontece em uma janela overlay por cima do navegador.
 
@@ -47,25 +57,45 @@ O app não modifica o site original — tudo acontece em uma janela overlay por 
 | Recurso | Status |
 |---------|--------|
 | Captura de tela via DXGI (GPU) | ✅ |
+| Captura WGC por janela com atualização por evento (sem exigir foco) | ✅ |
+| Captura externa recalcula a região ao mover/restaurar a janela | ✅ |
+| Overlay externo acompanha monitor, origem e escala do recorte | ✅ |
 | Captura viewport via Qt | ✅ |
 | OCR local (PaddleOCR) | ✅ |
 | Detecção de texto ONNX (GPU, DirectML) | ✅ |
 | Google Translate (grátis, sem chave) | ✅ |
+| Argos Translate (offline, modelos locais) | ⚠️ Opcional; runtime e modelos ainda não instalados |
 | Gemini LLM (grátis, com chave) | ✅ |
 | DeepL (grátis, com chave) | ✅ |
 | LibreTranslate (Docker local ilimitado) | ✅ |
 | Cache de traduções (SQLite) | ✅ |
+| Histórico pesquisável de traduções (SQLite) | ✅ |
+| Correção manual no histórico aplicada ao cache reutilizável | ✅ |
 | Cache de OCR (por hash de pixels) | ✅ |
 | Tradução em lote (1 request por frame) | ✅ |
 | Tradução assíncrona (não bloqueia UI) | ✅ |
+| Troca de provedor durante a sessão sem reiniciar a captura | ✅ |
+| Troca atômica de overlays após rolagem | ✅ |
+| Identidade visual persistente dos balões | ✅ |
+| Ajuste automático de fonte, prioridade ao balão detectado e prevenção de colisões | ✅ |
+| Detecção conservadora dos limites de balões para posicionar o texto | ✅ |
+| Fundo adaptativo do balão e contraste automático do texto | ✅ |
+| Remoção local dos glifos por inpainting antes do overlay | ✅ |
 | Rate limiter adaptativo (backoff + jitter) | ✅ |
 | Fallback automático entre provedores | ✅ |
-| Glossário de nomes próprios | ✅ |
+| Glossário de nomes/termos com editor na interface | ✅ |
+| Glossário contextual por obra, herdado do global | ✅ |
+| Importação e exportação de glossário TOML | ✅ |
 | Overlay transparente (janela top-level) | ✅ |
-| Modo contínuo (auto-traduz ao rolar) | ✅ |
+| Modo contínuo (auto-traduz ao rolar vertical ou horizontalmente) | ✅ |
 | Modo manual (Ctrl+Shift+T) | ✅ |
+| Abrir imagem(ns) local(is) em galeria vertical e traduzir durante a rolagem | ✅ |
+| Exportar captura visível com traduções sobrepostas em PNG | ✅ |
+| Atalhos globais Windows para traduzir/limpar região | ✅ |
+| Perfis locais por site (região e preferências, sem chaves) | ✅ |
+| Aparência do overlay por site (fonte, tamanho e opacidade) | ✅ |
 | Interface 100% em português | ✅ |
-| 67 testes automatizados | ✅ |
+| 193 testes automatizados | ✅ |
 
 ---
 
@@ -113,6 +143,7 @@ Dependências principais (instaladas automaticamente):
 - `onnxruntime-directml` 1.24.4 (inferência GPU)
 - `pyside6` 6.11 (UI + navegador embutido)
 - `opencv-python` (processamento de imagem)
+- `windows-capture` 2.0.1 (captura de janela WGC no Windows; fallback DXGI se indisponível)
 
 ---
 
@@ -172,8 +203,8 @@ START_READER.bat
 
 ```toml
 [ocr]
-# Detector de texto: "paddle" (CPU) ou "comic" (GPU ONNX, mais rápido)
-detector = "comic"
+# Detector de texto: "paddle" (recomendado) ou "comic" (experimental)
+detector = "paddle"
 
 # Modelo de reconhecimento: "mobile" (rápido) ou "server" (mais preciso)
 rec_model = "mobile"
@@ -181,8 +212,9 @@ rec_model = "mobile"
 # Modelo de detecção: "mobile" (rápido) ou "server" (mais preciso)
 det_model = "mobile"
 
-# Idiomas extras para OCR além do principal
-extra_langs = ["japan", "korean"]
+# Idiomas extras aumentam o tempo de leitura; deixe vazio salvo se necessário.
+# No leitor, o modo Auto tenta japonês como fallback quando apropriado.
+extra_langs = []
 
 [translation]
 # Provedor padrão: "google", "gemini", "deepl", "libre", "echo"
@@ -248,19 +280,30 @@ START_READER.bat
 
 | Tecla | Ação |
 |-------|------|
-| `Ctrl+Shift+T` | Traduzir região selecionada |
-| `Ctrl+Shift+R` | Limpar região e parar tradução automática |
+| `Ctrl+Shift+T` | Traduzir região selecionada (global no Windows) |
+| `Ctrl+Shift+R` | Limpar região e parar tradução automática (global no Windows) |
+
+Se outro programa já tiver registrado um atalho, o leitor mantém a combinação
+como atalho local, disponível enquanto a janela estiver em foco.
 
 ### Modos de Análise
 
 - **Contínuo** (padrão): captura automaticamente após rolagem parar
 - **Manual**: traduz apenas quando você clica em "Traduzir região"
 
+Use **Glossário** na barra do leitor para editar nomes protegidos, termos e
+regras de estilo. Alterações aplicam-se às próximas traduções e invalidam apenas
+as entradas de cache relacionadas; o histórico é preservado. **Glossário da obra**
+guarda exceções por série, herdando o glossário global e mantendo uma memória de
+tradução isolada para evitar reaproveitar traduções incompatíveis entre obras.
+
 ### CLI Directo
 
 ```powershell
 # Leitor com URL específica
 .\.venv311\Scripts\python.exe -m manga_rt_translator reader --config config.toml --glossary glossary.toml --url "https://mangadex.org"
+
+# Ou use "Abrir imagem…" na barra do leitor para traduzir uma página local
 
 # Listar janelas visíveis
 .\.venv311\Scripts\python.exe -m manga_rt_translator list-windows
@@ -288,6 +331,25 @@ START_READER.bat
 - **Velocidade:** ~1-4s por request
 - **Limite:** Quota diária gratuita
 - **Setup:** Configurar `MANGA_RT_GEMINI_API_KEY`
+
+### Argos Translate (offline)
+
+- **Chave/rede durante a tradução:** Não
+- **Qualidade:** Tradução neural local; depende dos modelos instalados
+- **Idiomas:** inglês → português brasileiro (`en → pb`); japonês pode usar a rota `ja → en → pb`
+- **Setup do backend:** `python -m pip install -e ".[offline]"` (opcional; instala uma cadeia pesada com Stanza/spaCy/PyTorch)
+- **Modelos:** com `argostranslate` instalado, use `argospm install translate-en_pb` para inglês e acrescente `argospm install translate-ja_en` para japonês. O app encadeia `ja → en → pb`; confirme a licença dos pesos antes do uso. O índice oficial não informa licença por pacote e o app não baixa modelos automaticamente.
+- **Seleção:** escolha `Argos offline` na lista Provedor. O app avisa se o runtime ou algum modelo necessário estiver ausente.
+
+O projeto também pode preparar a rota com confirmação antes de cada download:
+
+```powershell
+.\.venv311\Scripts\python.exe -m manga_rt_translator argos-models status
+.\.venv311\Scripts\python.exe -m manga_rt_translator argos-models install --source en --target pt-BR
+.\.venv311\Scripts\python.exe -m manga_rt_translator argos-models install --source japan --target pt-BR
+```
+
+Os nomes dos pacotes vêm do [índice oficial Argos](https://github.com/argosopentech/argospm-index/blob/main/index.json); o procedimento de instalação está na [documentação do Argos Translate](https://github.com/argosopentech/argos-translate/blob/master/docs/index.rst).
 
 ### DeepL
 
@@ -361,9 +423,11 @@ O UltraOCR implementa um rate limiter inteligente para evitar bloqueios:
 
 ### PaddleOCR (Padrão)
 
-- **Velocidade:** ~59ms por caixa (com doc-preprocessor desligado)
+- **Velocidade:** depende da área e do hardware; `max_input_side = 640` reduz
+  recortes grandes antes do OCR. Numa medição aquecida de 945x870, manteve os dois
+  textos e levou ~1.3 s; a primeira execução do runtime em outra captura levou 3.24 s
 - **Idiomas:** English, Japanese, Korean, Chinese, e mais
-- **GPU:** CPU por padrão (DirectML para detecção ONNX)
+- **GPU:** Paddle roda em CPU nesta configuração
 - **Cache:** hashes de pixels evitam reprocessamento
 
 ### Configuração
@@ -373,14 +437,16 @@ O UltraOCR implementa um rate limiter inteligente para evitar bloqueios:
 detector = "paddle"      # ou "comic"
 rec_model = "mobile"     # ou "server"
 det_model = "mobile"     # ou "server"
-extra_langs = ["japan", "korean"]
+max_input_side = 640      # limita o lado maior de recortes grandes; caixas voltam à escala original
+extra_langs = []          # idiomas adicionais elevam a latência
 ```
 
 ### Otimizações
 
-- **Doc-preprocessor desligado:** 1643ms → 59ms por caixa (28x mais rápido)
-- **Modelos mobile:** `PP-OCRv5_mobile_rec` para en/korean; `PP-OCRv5_mobile_rec` genérico para japan
-- **Retry 2x:** quando confiança < 0.85, tenta com upscaling
+- **Doc-preprocessor desligado:** evita iniciar modelos de correção de documento que não ajudam no layout de mangá
+- **Modelos mobile:** `en_PP-OCRv5_mobile_rec` para inglês; `japan_PP-OCRv3_mobile_rec` para japonês
+- **Japonês vertical:** caixas OCR altas com texto japonês repetem somente aquele recorte com `PP-OCRv5_server_rec`; carregado sob demanda e reutilizado em cache
+- **Retry 2x:** em recortes pequenos quando confiança < 0.85, tenta com upscaling
 - **Dedup por IoU:** 0.55 para remover detecções duplicadas
 
 ---
@@ -389,10 +455,11 @@ extra_langs = ["japan", "korean"]
 
 ### ComicTextDetector (ONNX)
 
-- **Velocidade:** ~80ms na RTX 3070 (GPU via DirectML)
-- **Precisão:** Boa para fonte impressa; calibrada para manuscrita
+- **Velocidade:** o tempo do detector sozinho não representa o fluxo completo: Paddle ainda reconhece as caixas
+- **Precisão:** experimental; numa página local levou ~3 s no total e produziu fragmentos/falsos positivos
 - **Threshold:** `LINE_THRESHOLD = 0.25` (ajustado de 0.35)
 - **Merge:** `_merge_close_boxes` junta fragmentos com gap ≤14px
+- **Dependências:** baixa um modelo ONNX de aproximadamente 90 MB; usa DirectML quando disponível
 
 ### Ativar
 
@@ -405,8 +472,12 @@ detector = "comic"
 
 | Detector | Velocidade | Precisão | GPU |
 |----------|-----------|----------|-----|
-| Paddle | ~1643ms/crop | Boa | CPU |
-| Comic (ONNX) | ~80ms/crop | Boa | DirectML |
+| Paddle | 1.32–1.38 s aquecido em captura 945x870 com limite 768 nesta máquina | Melhor nesta amostra | CPU |
+| Comic (ONNX) | ~3.0 s ponta a ponta nesta amostra; detector sozinho ~270 ms | Experimental, fragmentou texto | DirectML para detecção |
+
+Em duas capturas locais de mangá, 640 px preservou todos os textos reconhecidos
+em 768 px e reduziu o OCR aquecido em cerca de 15–21%. Em 512 px, uma palavra
+curta perdeu uma letra; por isso 640 é o padrão e continua ajustável por obra.
 
 ---
 
@@ -476,7 +547,7 @@ manga_rt_translator/
   __init__.py           pacote
   __main__.py           entry point
   app_runtime.py        runtime da aplicação
-  cache.py              SQLite Translation Memory
+  cache.py              SQLite Translation Memory e histórico pesquisável
   capture/              backends de captura
     base.py
     factory.py
@@ -488,18 +559,20 @@ manga_rt_translator/
   glossary.py           glossário e nomes protegidos
   hybrid_ocr.py         OCR híbrido (ONNX + Paddle)
   image_hash.py         hashing de imagens
+  overlay_background.py amostragem de cor e contraste para balões
   models.py             data models compartilhados
   ocr.py                PaddleOCR adapter + ComicTextOcr
   overlay.py            Qt transparent overlay
   pipeline.py           orquestração end-to-end
   reader.py             app principal (PySide6)
+  profiles.py           região e preferências locais por domínio
   reader_runtime.py     worker cancelável
   text_regions.py       filtragem de ROI de texto
   translator.py         provedores de tradução + RateLimitTracker
   ui.py                 painel de controle
   work_queue.py         mailbox de último frame
 
-tests/                  67 testes automatizados
+  tests/                  193 testes automatizados
 scripts/                scripts de validação e benchmark
 docs/                   documentação do projeto
 ```
@@ -532,13 +605,27 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 
 # Validação de scroll
 .\.venv311\Scripts\python.exe scripts\validate_reader_scroll.py
+# Também verifica mudança de zoom e releitura da viewport.
 .\.venv311\Scripts\python.exe scripts\validate_reader_scroll.py --scale-factor 1.25
+# A escala 1.25 valida coordenadas e scroll vertical/horizontal; o zoom é testado na execução padrão.
+
+# Validar OCR japonês + Google no leitor com uma imagem e região locais
+.\.venv311\Scripts\python.exe scripts\validate_japanese_reader.py --image pagina-japonesa.png --region 430,80,580,440 --expected-source "texto japonês esperado"
+
+# Validar um balão japonês vertical pelo leitor e stream reais de captura
+.\.venv311\Scripts\python.exe scripts\validate_japanese_reader.py --vertical-fixture
 
 # Benchmark de OCR
 .\.venv311\Scripts\python.exe scripts\benchmark_ocr.py reader_debug_output\last_capture.png
 
 # Validação de overlay
 .\.venv311\Scripts\python.exe scripts\validate_overlay_layout.py caminho-da-imagem.png
+
+# OCR + layout real do leitor, com tradução PT-BR de teste (sem provedor/rede)
+.\.venv311\Scripts\python.exe scripts\validate_overlay_capture.py captura.png --region 515,100,648,870
+
+# Overlay de produção excluído de um frame DXGI real (Windows)
+.\.venv311\Scripts\python.exe scripts\validate_dxgi_overlay_exclusion.py
 
 # Reparo de cache
 .\.venv311\Scripts\python.exe scripts\repair_translation_cache.py --apply
@@ -552,7 +639,7 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 # Rodar todos os testes
 .\.venv311\Scripts\python.exe -m pytest tests -q
 
-# Resultado esperado: 67 passed
+# Resultado esperado: 193 passed
 ```
 
 ### Cobertura
@@ -588,7 +675,6 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 ### Curto Prazo
 
 - [ ] Empacotamento: instalador Inno Setup + ícone + atalho
-- [ ] Perfis por site/obra (região + provedor + FPS + idioma)
 - [ ] Calibração do detector comic para fonte manuscrita
 
 ### Médio Prazo

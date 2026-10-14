@@ -35,6 +35,85 @@ def test_latest_mailbox_keeps_frame_and_request_together():
     assert not first.token.commit(lambda: pytest.fail('stale publication'))
 
 
+def test_unforced_latest_frame_keeps_pending_full_read():
+    state = ViewState()
+    mailbox = LatestFrameQueue(state)
+    mailbox.put(frame(1), force=True)
+    mailbox.put(frame(2))
+
+    request = mailbox.get()
+
+    assert request.frame.index == 2
+    assert request.force
+    assert not request.incremental
+    assert request.token.current()
+
+
+def test_unforced_latest_frame_keeps_pending_inspection():
+    state = ViewState()
+    mailbox = LatestFrameQueue(state)
+    mailbox.put(frame(1), inspect=True)
+    mailbox.put(frame(2))
+
+    request = mailbox.get()
+
+    assert request.frame.index == 2
+    assert request.inspect
+    assert not request.force
+
+
+def test_coalescing_incremental_frame_promotes_to_full_read():
+    state = ViewState()
+    mailbox = LatestFrameQueue(state)
+    mailbox.put(frame(1), incremental=True)
+    mailbox.put(frame(2))
+
+    request = mailbox.get()
+
+    assert request.frame.index == 2
+    assert request.force
+    assert not request.incremental
+
+
+def test_in_flight_request_remains_visible_to_scroll_invalidation():
+    state = ViewState()
+    mailbox = LatestFrameQueue(state)
+    mailbox.put(frame(1), force=True)
+    request = mailbox.get()
+
+    assert mailbox.has_work()
+    mailbox.invalidate()
+    assert mailbox.has_work()
+
+    mailbox.complete(request)
+    assert not mailbox.has_work()
+
+
+def test_incremental_frame_is_prioritized_without_changing_its_processing_mode():
+    state = ViewState()
+    mailbox = LatestFrameQueue(state)
+    mailbox.put(frame(8), force=True, incremental=True)
+
+    request = mailbox.get()
+
+    assert request.force
+    assert request.incremental
+    assert request.token.current()
+
+
+def test_scroll_invalidation_records_when_queued_work_was_interrupted(tmp_path):
+    config = AppConfig()
+    config.cache.path = str(tmp_path / 'cache.sqlite')
+    overlay = RecordingOverlay()
+    runtime = ReaderRuntime(config, Glossary.default(), overlay, lambda text: None, False)
+    runtime.frame_queue.put(frame(1), force=True)
+
+    runtime.invalidate_view(clear_overlay=False, scrolling=True)
+
+    assert runtime.needs_full_refresh_after_scroll
+    assert not runtime.frame_queue.has_work()
+
+
 class RecordingOverlay:
     def __init__(self):
         self.view = ViewState()
@@ -97,9 +176,12 @@ def test_scroll_during_ocr_drops_old_and_pending_frames(tmp_path, monkeypatch):
     try:
         runtime.push_frame(frame(1).image, force_analyze=True)
         assert ocr.started.wait(5)
-        runtime.invalidate_view()
+        runtime.invalidate_view(scrolling=True)
+        assert runtime.needs_full_refresh_after_scroll
         runtime.push_frame(frame(2).image, force_analyze=True)
         runtime.push_frame(frame(3).image, force_analyze=True)
+        runtime.mark_scroll_refresh_submitted()
+        assert not runtime.needs_full_refresh_after_scroll
         ocr.release.set()
         assert overlay.translated.wait(5)
         assert ocr.calls == [1, 3]
@@ -107,6 +189,94 @@ def test_scroll_during_ocr_drops_old_and_pending_frames(tmp_path, monkeypatch):
         assert all(source == 'Frame 3' for source, _ in overlay.history)
     finally:
         ocr.release.set()
+        runtime.stop(5)
+    assert not runtime.worker.is_alive()
+    assert not runtime.last_error
+
+
+def test_scroll_during_translation_requests_full_view_retry(tmp_path, monkeypatch):
+    import manga_rt_translator.reader_runtime as module
+
+    class ImmediateOcr:
+        detects_text = True
+
+        def recognize_cancellable(self, image, regions, check):
+            check()
+            index = int(image[0, 0, 0])
+            return [TextRegion(Rect(20, 30, 100, 30), f'Frame {index}', .99,
+                               'en', f'hash-{index}')]
+
+    translator, overlay = RecordingTranslator(), RecordingOverlay()
+    translator.block = True
+    monkeypatch.setattr(module, 'create_ocr_engine', lambda config: ImmediateOcr())
+    monkeypatch.setattr(module, 'create_translator', lambda config, echo: translator)
+    config = AppConfig()
+    config.cache.path = str(tmp_path / 'cache.sqlite')
+    runtime = ReaderRuntime(config, Glossary.default(), overlay, lambda text: None, False)
+    runtime.start()
+    try:
+        runtime.push_frame(frame(1).image, force_analyze=True)
+        assert translator.started.wait(5)
+
+        runtime.invalidate_view(clear_overlay=False, scrolling=True)
+        assert runtime.needs_full_refresh_after_scroll
+        runtime.push_frame(frame(2).image, force_analyze=True)
+        runtime.mark_scroll_refresh_submitted()
+        translator.release.set()
+
+        assert overlay.translated.wait(5)
+        assert translator.calls == [['Frame 1'], ['Frame 2']]
+        assert overlay.history == [('Frame 2', 'Traduzido: Frame 2')]
+    finally:
+        translator.release.set()
+        runtime.stop(5)
+    assert not runtime.worker.is_alive()
+    assert not runtime.last_error
+
+
+def test_switching_provider_does_not_wait_for_or_publish_old_request(tmp_path, monkeypatch):
+    import copy
+    import manga_rt_translator.reader_runtime as module
+
+    class ImmediateOcr:
+        detects_text = True
+
+        def recognize_cancellable(self, image, regions, check):
+            check()
+            index = int(image[0, 0, 0])
+            return [TextRegion(Rect(20, 30, 100, 30), f'Frame {index}', .99,
+                               'en', f'hash-{index}')]
+
+    old_translator, new_translator = RecordingTranslator(), RecordingTranslator()
+    old_translator.block = True
+    translators = {'google': old_translator, 'gemini': new_translator}
+    overlay = RecordingOverlay()
+    monkeypatch.setattr(module, 'create_ocr_engine', lambda config: ImmediateOcr())
+    monkeypatch.setattr(
+        module, 'create_translator',
+        lambda config, echo: translators[config.translation.provider],
+    )
+    config = AppConfig()
+    config.cache.path = str(tmp_path / 'cache.sqlite')
+    runtime = ReaderRuntime(config, Glossary.default(), overlay, lambda text: None, False)
+    runtime.start()
+    try:
+        runtime.push_frame(frame(1).image, force_analyze=True)
+        assert old_translator.started.wait(5)
+
+        new_config = copy.deepcopy(config)
+        new_config.translation.provider = 'gemini'
+        runtime.replace_translation_config(new_config, echo_translator=False)
+        runtime.push_frame(frame(2).image, force_analyze=True)
+
+        assert overlay.translated.wait(5)
+        assert new_translator.calls == [['Frame 2']]
+        assert overlay.history == [('Frame 2', 'Traduzido: Frame 2')]
+        old_translator.release.set()
+        time.sleep(.05)
+        assert overlay.history == [('Frame 2', 'Traduzido: Frame 2')]
+    finally:
+        old_translator.release.set()
         runtime.stop(5)
     assert not runtime.worker.is_alive()
     assert not runtime.last_error

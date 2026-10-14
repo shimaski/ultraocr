@@ -69,6 +69,20 @@ class Frame:
     timestamp: float
     index: int
     dirty_rects: tuple[Rect, ...] = field(default_factory=tuple)
+    dirty_rects_stable: bool = False
+    capture_viewport: CaptureViewport | None = None
+    capture_lost: bool = False
+
+
+@dataclass(frozen=True)
+class CaptureViewport:
+    """Physical-pixel placement of a captured crop on a display."""
+
+    capture_origin: tuple[int, int]
+    capture_size: tuple[int, int]
+    monitor_origin: tuple[int, int]
+    monitor_device_name: str = ""
+    monitor_index: int = 0
 
 
 @dataclass
@@ -79,6 +93,7 @@ class TextRegion:
     source_lang: str | None = None
     visual_hash: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    polygons: tuple[tuple[tuple[float, float], ...], ...] = ()
 
 
 @dataclass
@@ -88,3 +103,11 @@ class OverlayItem:
     source_text: str = ""
     confidence: float = 0.0
     expires_at: float | None = None
+    # Stable identity of the source pixels. Keeping it on the presentation
+    # item lets later sweeps update the same balloon even when its OCR box
+    # moves a few pixels or the translated text changes the painted size.
+    visual_hash: str = ""
+    background_color: tuple[int, int, int] | None = None
+    background_patch: Any | None = None
+    background_rect: Rect | None = None
+    display_bbox: Rect | None = None

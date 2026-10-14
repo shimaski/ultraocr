@@ -103,6 +103,7 @@ def test_numpy_paddle_polygons_do_not_use_ambiguous_truth_value():
     result = parse_paddle_result(raw, Rect(0, 0, 200, 200), 'en',
                                  np.zeros((200, 200, 3), np.uint8))
     assert result[0].text == 'Hello'
+    assert result[0].polygons == (((10.0, 10.0), (110.0, 10.0), (110.0, 30.0), (10.0, 30.0)),)
 
 
 def test_paddle_cancellation_checked_before_upscale_retry(monkeypatch):
