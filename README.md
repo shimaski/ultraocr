@@ -8,7 +8,7 @@ Tradutor e leitor em tempo real para mangás, manhwas, manhuas e HQs no Windows.
 
 - [Visão Geral](#visão-geral)
 - [Funcionalidades](#funcionalidades)
-- [Capturas de Tela](#capturas-de-tela)
+- [Capturas Reais](#capturas-reais)
 - [Requisitos](#requisitos)
 - [Instalação](#instalação)
 - [Configuração](#configuração)
@@ -38,6 +38,10 @@ O UltraOCR é um leitor de mangá/desktop que:
 4. **Traduz** o texto via Argos local ou Google Translate, Gemini, DeepL ou LibreTranslate
 5. **Renderiza** a tradução em português sobre o texto original em um overlay transparente
 
+O leitor gráfico e a captura de janela estão implementados para Windows. OCR roda
+localmente; provedores de tradução online precisam de internet. DirectML/GPU é
+opcional e usado apenas pelo detector ONNX experimental.
+
 Durante a rolagem, o overlay anterior é ocultado sem descartar seus dados. A
 nova geração substitui todos os balões de uma vez somente depois que OCR,
 cache e tradução terminam. Cada balão carrega um hash visual persistente para
@@ -63,10 +67,10 @@ O app não modifica o site original — tudo acontece em uma janela overlay por 
 | Captura viewport via Qt | ✅ |
 | OCR local (PaddleOCR) | ✅ |
 | Detecção de texto ONNX (GPU, DirectML) | ✅ |
-| Google Translate (grátis, sem chave) | ✅ |
-| Argos Translate (offline, modelos locais) | ⚠️ Opcional; runtime e modelos ainda não instalados |
-| Gemini LLM (grátis, com chave) | ✅ |
-| DeepL (grátis, com chave) | ✅ |
+| Google Translate (sem chave; precisa de internet) | ✅ |
+| Argos Translate (offline, modelos locais) | ⚠️ Opcional; requer runtime e modelos instalados |
+| Gemini LLM (com chave; limites dependem da conta) | ✅ |
+| DeepL (API oficial, com chave) | ✅ |
 | LibreTranslate (Docker local ilimitado) | ✅ |
 | Cache de traduções (SQLite) | ✅ |
 | Histórico pesquisável de traduções (SQLite) | ✅ |
@@ -100,31 +104,25 @@ O app não modifica o site original — tudo acontece em uma janela overlay por 
 
 ---
 
-## Capturas de Tela
+## Capturas Reais
 
-### Leitor
+Capturas feitas a partir da interface executável do leitor. O GIF alterna entre
+capturas reais do painel nos dois temas; não há telas ou diálogos desenhados,
+páginas de terceiros ou chaves de API nas imagens.
 
-Recorte real do painel do leitor: controles de OCR/tradução, seleção de região,
-idiomas e provedores. O conteúdo de terceiros da página foi excluído da imagem.
+| Painel claro | Painel escuro |
+|---|---|
+| ![Controles reais do leitor no tema claro](docs/media/reader-controls.png) | ![Controles reais do leitor no tema escuro](docs/media/reader-controls-dark.png) |
 
-![Painel real do leitor UltraOCR](docs/media/reader-controls.png)
+O GIF mostra o mesmo painel alternando entre os dois temas:
 
-### Como funciona
+![Capturas reais da alternância de tema no leitor](docs/media/reader-theme-toggle.gif)
 
-![Pipeline de captura, OCR, memória de tradução e overlay](docs/media/pipeline.png)
-
-Os GIFs abaixo são simulações visuais do fluxo e da rolagem; as falas são texto
-de demonstração, não uma captura de tradução ao vivo.
-
-![Demonstração ilustrativa: abrir, reconhecer e sobrepor a tradução](docs/media/reader-workflow.gif)
-
-![Demonstração ilustrativa: atualização incremental ao rolar a página](docs/media/scroll-stream.gif)
-
-Para recriar o diagrama e os GIFs:
+Para refazer as capturas da interface no Windows, com OCR e rede desativados:
 
 ```powershell
 .\.venv311\Scripts\python.exe -m pip install -e ".[readme-media]"
-.\.venv311\Scripts\python.exe scripts\generate_readme_visuals.py
+.\.venv311\Scripts\python.exe scripts\capture_readme_media.py
 ```
 
 ---
@@ -134,25 +132,24 @@ Para recriar o diagrama e os GIFs:
 ### Software
 
 - **Windows 10/11** (64-bit)
-- **Python 3.11** (SEMPRE usar `.venv311` — o `.venv` padrão usa 3.14 que quebra PaddleOCR)
-- **GPU NVIDIA/AMD/Intel** (recomendado para detecção ONNX via DirectML)
+- **Python 3.11** (versão usada nos testes e recomendada para este ambiente)
+- **GPU NVIDIA/AMD/Intel** (opcional; acelera apenas o detector ONNX via DirectML)
 - **Git** (para clonar)
 
 ### Hardware Recomendado
 
-- GPU com suporte DirectML (RTX 3070 ou superior recomendado)
 - 8GB+ de RAM
-- SSD para carregamento rápido de modelos
+- GPU dedicada não é obrigatória; o PaddleOCR pode rodar em CPU
+- SSD recomendado para carregar os modelos locais mais rápido
 
 ### Python Packages
 
-Dependências principais (instaladas automaticamente):
+Dependências principais (restrições e versões são mantidas em `requirements.txt`):
 
-- `paddlepaddle` 3.3.1 (backend OCR)
-- `paddleocr` 3.3.1 (reconhecimento de texto)
-- `paddlex` 3.x (pipeline de modelos)
-- `onnxruntime-directml` 1.24.4 (inferência GPU)
-- `pyside6` 6.11 (UI + navegador embutido)
+- `paddleocr` e `paddlepaddle` (reconhecimento de texto local)
+- `paddlex` (pipeline e modelos OCR)
+- `onnxruntime-directml` (inferência GPU opcional no Windows)
+- `pyside6` (UI + navegador embutido)
 - `opencv-python` (processamento de imagem)
 - `windows-capture` 2.0.1 (captura de janela WGC no Windows; fallback DXGI se indisponível)
 
@@ -190,10 +187,10 @@ Copy-Item glossary.example.toml glossary.toml
 ### 5. Configurar chaves de API (opcional)
 
 ```powershell
-# Gemini (grátis em aistudio.google.com/apikey)
+# Gemini (crie uma chave em aistudio.google.com/apikey; limites/preço podem variar)
 $env:MANGA_RT_GEMINI_API_KEY = "sua-chave"
 
-# DeepL (grátis em deepl.com/pro-api)
+# DeepL (consulte os planos atuais em deepl.com/pro-api)
 $env:MANGA_RT_DEEPL_API_KEY = "sua-chave"
 
 # LibreTranslate (opcional, para instância pública)
@@ -217,8 +214,9 @@ o leitor sem deixar um terminal visível. Para gerá-lo neste computador:
 .\dist\UltraOCR-local\UltraOCR.exe
 ```
 
-Esse EXE é um iniciador local, não um pacote portátil: requer a pasta do projeto,
-o ambiente `.venv311` e as dependências/modelos instalados. As configurações e o
+Esse EXE é um iniciador local de desenvolvimento, não um instalador para outras
+pessoas: requer a pasta do projeto, o ambiente `.venv311` e as dependências.
+Os modelos OCR podem ser baixados na primeira execução. As configurações e o
 banco de traduções ficam em `%LOCALAPPDATA%\UltraOCR`.
 
 ---
@@ -317,13 +315,13 @@ como atalho local, disponível enquanto a janela estiver em foco.
 - **Contínuo** (padrão): captura automaticamente após rolagem parar
 - **Manual**: traduz apenas quando você clica em "Traduzir região"
 
-Use **Glossário** na barra do leitor para editar nomes protegidos, termos e
+Use **Ferramentas > Glossário geral** no leitor para editar nomes protegidos, termos e
 regras de estilo. Alterações aplicam-se às próximas traduções e invalidam apenas
 as entradas de cache relacionadas; o histórico é preservado. **Glossário da obra**
 guarda exceções por série, herdando o glossário global e mantendo uma memória de
 tradução isolada para evitar reaproveitar traduções incompatíveis entre obras.
 
-### CLI Directo
+### CLI Direto
 
 ```powershell
 # Leitor com URL específica
@@ -345,24 +343,23 @@ tradução isolada para evitar reaproveitar traduções incompatíveis entre obr
 ### Google Translate (Padrão)
 
 - **Chave necessária:** Não
-- **Qualidade:** Boa
-- **Velocidade:** ~700ms por request
-- **Limite:** Pode bloquear IP após muitos requests (rate limiter adaptativo)
-- **Setup:** Nenhum — funciona imediatamente
+- **Qualidade:** Adequada para tradução automática; pode variar com o texto
+- **Velocidade:** depende da rede e do limite aplicado pelo serviço
+- **Limite:** o serviço externo pode limitar ou bloquear solicitações; o app usa backoff e fallback, não contorna bloqueios
+- **Setup:** sem configuração adicional; precisa de internet
 
 ### Gemini (LLM)
 
-- **Chave necessária:** Sim (grátis em aistudio.google.com/apikey)
-- **Qualidade:** Excelente (entende contexto de cena)
-- **Velocidade:** ~1-4s por request
-- **Limite:** Quota diária gratuita
+- **Chave necessária:** Sim; disponibilidade, preço e quotas dependem da conta e das condições atuais do Google
+- **Qualidade:** tradução contextual; o resultado depende do modelo e do texto
+- **Velocidade:** variável; geralmente mais lenta que tradução automática convencional
 - **Setup:** Configurar `MANGA_RT_GEMINI_API_KEY`
 
 ### Argos Translate (offline)
 
 - **Chave/rede durante a tradução:** Não
 - **Qualidade:** Tradução neural local; depende dos modelos instalados
-- **Idiomas:** inglês → português brasileiro (`en → pb`); japonês pode usar a rota `ja → en → pb`
+- **Idiomas:** inglês → português (`en → pb`); japonês pode usar a rota `ja → en → pb`
 - **Setup do backend:** `python -m pip install -e ".[offline]"` (opcional; instala uma cadeia pesada com Stanza/spaCy/PyTorch)
 - **Modelos:** com `argostranslate` instalado, use `argospm install translate-en_pb` para inglês e acrescente `argospm install translate-ja_en` para japonês. O app encadeia `ja → en → pb`; confirme a licença dos pesos antes do uso. O índice oficial não informa licença por pacote e o app não baixa modelos automaticamente.
 - **Seleção:** escolha `Argos offline` na lista Provedor. O app avisa se o runtime ou algum modelo necessário estiver ausente.
@@ -379,23 +376,21 @@ Os nomes dos pacotes vêm do [índice oficial Argos](https://github.com/argosope
 
 ### DeepL
 
-- **Chave necessária:** Sim (grátis em deepl.com/pro-api)
+- **Chave necessária:** Sim; consulte preço e quota atuais na sua conta DeepL
 - **Qualidade:** Muito boa
-- **Velocidade:** ~500ms por request
-- **Limite:** 500.000 caracteres/mês (grátis)
 - **Setup:** Configurar `MANGA_RT_DEEPL_API_KEY`
 
 ### LibreTranslate
 
-- **Chave necessária:** Não (pública) ou Sim (Docker local)
+- **Chave necessária:** depende da instância; uma instância própria pode ser usada localmente
 - **Qualidade:** Boa
-- **Velocidade:** ~1s por request
-- **Limite:** Instância pública tem rate limit; Docker local é ilimitado
+- **Velocidade:** depende da instância e do hardware
+- **Limite:** instâncias públicas podem impor limites; uma instância local depende dos recursos do PC
 - **Setup Docker local:**
   ```powershell
   docker run -ti --rm -p 5000:5000 libretranslate/libretranslate
   ```
-  Then config `libre_url = "http://localhost:5000"`
+  Depois configure `libre_url = "http://localhost:5000"` no `config.toml`.
 
 ### Echo (Teste)
 
@@ -416,7 +411,8 @@ O sistema usa uma cadeia de fallback automática:
 
 ## Rate Limiter Adaptativo
 
-O UltraOCR implementa um rate limiter inteligente para evitar bloqueios:
+O UltraOCR implementa um rate limiter para reagir a respostas de limite e reduzir
+repetições agressivas. Ele não contorna bloqueios impostos por provedores.
 
 ### Características
 
@@ -536,15 +532,14 @@ curta perdeu uma letra; por isso 640 é o padrão e continua ajustável por obra
 ```
 reader.py (app principal, PySide6)
   ├─ QWebEngineView (navegador embutido, ANGLE/GPU)
-  ├─ Escuta de scroll: poll JS assíncrono (8/s)
-  │    ├─ movimento → fade imediato das caixas velhas (0.4s)
-  │    └─ parada (2 sondas ~250ms) → Traduzir região direto
-  ├─ sweep_timer 1.0s → análise de frame fresco
-  ├─ capture_timer 1.0s → heartbeat (suprimido durante scroll)
+  ├─ Escuta de scroll: poll JS assíncrono (8/s por padrão, ajustável)
+  │    ├─ movimento → invalida as caixas antigas sem descartar os dados
+  │    └─ parada → espera o scroll estabilizar (550ms por padrão) e agenda análise
+  ├─ sweep_timer coordena verificações; captura/OCR só ocorrem quando necessário
   ├─ Overlay: JANELA TOP-LEVEL transparente
   └─ ReaderRuntime (thread worker, prioridade abaixo do normal)
        └─ MangaTranslationPipeline
-            ├─ FrameDiffer (diff por tiles + estabilidade 150ms)
+            ├─ FrameDiffer (diff por tiles + estabilidade 220ms)
             ├─ TextRegionDetector (Paddle) / detect_lines (comic ONNX)
             ├─ _ocr_cached: cache de OCR por hash de conteúdo
             ├─ PaddleOcrEngine (det+rec por recorte; retry 2x se conf<0.85)
@@ -554,8 +549,8 @@ reader.py (app principal, PySide6)
 
 translator.py — cadeia de provedores (FallbackChain com cooldown)
   ├─ google  : endpoint gratuito gtx (conexão HTTPS persistente)
-  ├─ gemini  : LLM grátis (contexto de cena, corrige erros de OCR)
-  ├─ deepl   : REST oficial (chave grátis)
+  ├─ gemini  : LLM contextual (chave e quota da conta)
+  ├─ deepl   : REST oficial (chave de API)
   ├─ libre   : Docker local ilimitado
   └─ echo    : último recurso (nunca trava)
 
@@ -666,7 +661,7 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 # Rodar todos os testes
 .\.venv311\Scripts\python.exe -m pytest tests -q
 
-# Resultado esperado: 194 passed
+# Resultado esperado: 196 passed
 ```
 
 ### Cobertura
@@ -699,6 +694,8 @@ preservar entradas existentes; o arquivo não inclui histórico nem cache visual
 
 6. **Anúncios do site:** popups/banners são traduzidos (rotacionam → caixa destoa). Atenuar com região bem ajustada.
 
+7. **Shell WPF experimental:** `UltraMangaReader.Wpf` é somente um protótipo de navegação; ainda não integra OCR, tradução nem captura.
+
 ---
 
 ## Roadmap
@@ -708,10 +705,6 @@ preservar entradas existentes; o arquivo não inclui histórico nem cache visual
 - [ ] Empacotamento: instalador Inno Setup + ícone + atalho
 - [ ] Calibração do detector comic para fonte manuscrita
 
-O leitor oferece alternância claro/escuro pela barra superior e lembra a escolha
-localmente. O tema afeta os controles do aplicativo; a página do site e as imagens
-do mangá permanecem sem alterações.
-
 ### Médio Prazo
 
 - [ ] Legendas ao vivo: áudio → Whisper → tradução
@@ -720,7 +713,7 @@ do mangá permanecem sem alterações.
 
 ### Longo Prazo
 
-- [ ] Shell nativo WPF (WebView2) — UltraMangaReader.Wpf
+- [ ] Concluir o shell WPF experimental se a medição justificar a migração
 - [ ] Suporte macOS (ScreenCaptureKit) e Linux (PipeWire)
 - [ ] Detector de balões dedicado
 

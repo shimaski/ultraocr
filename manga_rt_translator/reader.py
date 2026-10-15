@@ -164,7 +164,7 @@ def _reader_stylesheet(dark: bool) -> str:
             selection-background-color: {colors['accent']};
             selection-color: #ffffff; border: 1px solid {colors['border']};
         }}
-        QCheckBox, QLabel {{ color: {colors['text']}; }}
+        QCheckBox, QLabel {{ color: {colors['text']}; background: transparent; }}
         QStatusBar {{
             background: {colors['panel']}; color: {colors['muted']};
             border-top: 1px solid {colors['border']};
@@ -851,8 +851,8 @@ def run_reader_app(
                 | QDockWidget.DockWidgetFeature.DockWidgetFloatable
                 | QDockWidget.DockWidgetFeature.DockWidgetClosable
             )
-            dock.setMinimumWidth(280)
-            dock.setMaximumWidth(360)
+            dock.setMinimumWidth(500)
+            dock.setMaximumWidth(600)
             panel = QWidget(dock)
             panel_layout = QVBoxLayout(panel)
             panel_layout.setContentsMargins(12, 12, 12, 12)
@@ -887,8 +887,12 @@ def run_reader_app(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
             self.source_combo = QComboBox()
+            self.source_combo.setMinimumContentsLength(13)
+            self.source_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
             for label, language in (
-                ("Automático (inglês/japonês)", "Auto"),
+                ("Auto (EN/JP)", "Auto"),
                 ("Inglês", "en"),
                 ("Japonês", "japan"),
                 ("Coreano", "korean"),
@@ -902,11 +906,19 @@ def run_reader_app(
             translation_form.addRow("Idioma de origem", self.source_combo)
 
             self.mode_combo = QComboBox()
+            self.mode_combo.setMinimumContentsLength(15)
+            self.mode_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
             self.mode_combo.addItems(["Traduzir PT-BR", "Somente OCR (rápido)"])
             self.mode_combo.setCurrentText("Traduzir PT-BR")
             translation_form.addRow("Modo", self.mode_combo)
 
             self.provider_combo = QComboBox()
+            self.provider_combo.setMinimumContentsLength(12)
+            self.provider_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
             self.provider_combo.addItems(
                 ["Google", "DeepL", "Gemini", "Libre", "Argos offline", "Echo"]
             )
@@ -946,6 +958,10 @@ def run_reader_app(
                 QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
             self.analysis_combo = QComboBox()
+            self.analysis_combo.setMinimumContentsLength(9)
+            self.analysis_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
             self.analysis_combo.addItems(["Manual", "Contínuo"])
             self.analysis_combo.setCurrentText("Contínuo")
             capture_form.addRow("Análise", self.analysis_combo)
@@ -958,12 +974,14 @@ def run_reader_app(
             )
             capture_form.addRow("Sensibilidade", self.fps_spin)
 
-            self.overlay_checkbox = QCheckBox("Mostrar tradução sobre a página")
+            self.overlay_checkbox = QCheckBox("Overlay visível")
             self.overlay_checkbox.setChecked(True)
+            self.overlay_checkbox.setToolTip("Mostrar ou ocultar as traduções sobre a página")
             capture_form.addRow(self.overlay_checkbox)
 
-            self.auto_refresh_checkbox = QCheckBox(
-                "Repetir tradução automaticamente"
+            self.auto_refresh_checkbox = QCheckBox("Repetir tradução")
+            self.auto_refresh_checkbox.setToolTip(
+                "Repetir a tradução automaticamente no intervalo escolhido"
             )
             self.refresh_spin = QSpinBox()
             self.refresh_spin.setRange(1, 10)
