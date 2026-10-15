@@ -85,6 +85,94 @@ def _reader_ocr_languages(source: str) -> tuple[str, list[str]]:
     return source, []
 
 
+def _reader_stylesheet(dark: bool) -> str:
+    if dark:
+        colors = {
+            "window": "#171b1e",
+            "panel": "#202629",
+            "raised": "#272f33",
+            "border": "#394449",
+            "text": "#e5ecee",
+            "muted": "#aab8bc",
+            "hover": "#303b40",
+            "input": "#1b2225",
+            "accent": "#087f86",
+            "accent_hover": "#09939b",
+        }
+    else:
+        colors = {
+            "window": "#f4f6f6",
+            "panel": "#ffffff",
+            "raised": "#edf2f2",
+            "border": "#d5dede",
+            "text": "#263437",
+            "muted": "#58676b",
+            "hover": "#edf5f5",
+            "input": "#fbfcfc",
+            "accent": "#087f86",
+            "accent_hover": "#066d74",
+        }
+    return f"""
+        QWidget {{ background: {colors['window']}; color: {colors['text']}; }}
+        QMainWindow, QWidget#readerRoot {{
+            background: {colors['window']}; color: {colors['text']};
+        }}
+        QToolBar#navigationToolbar {{
+            background: {colors['panel']}; border: 0;
+            border-bottom: 1px solid {colors['border']}; spacing: 6px; padding: 8px;
+        }}
+        QToolBar#navigationToolbar QToolButton,
+        QToolBar#navigationToolbar QPushButton {{
+            min-height: 32px; padding: 0 10px; border: 1px solid {colors['border']};
+            border-radius: 5px; background: {colors['panel']}; color: {colors['text']};
+        }}
+        QToolBar#navigationToolbar QToolButton:hover,
+        QToolBar#navigationToolbar QPushButton:hover {{ background: {colors['hover']}; }}
+        QLineEdit#chapterUrlInput {{
+            min-height: 32px; padding: 0 10px; border: 1px solid {colors['border']};
+            border-radius: 5px; background: {colors['input']}; color: {colors['text']};
+        }}
+        QLineEdit#chapterUrlInput:focus {{ border: 1px solid {colors['accent']}; }}
+        QDockWidget#translationDock {{ background: {colors['window']}; }}
+        QDockWidget#translationDock::title {{
+            background: {colors['raised']}; padding: 9px 12px; font-weight: 600;
+            border-bottom: 1px solid {colors['border']};
+        }}
+        QGroupBox {{
+            font-weight: 600; border: 1px solid {colors['border']}; border-radius: 5px;
+            margin-top: 10px; padding: 12px 8px 8px; background: {colors['panel']};
+        }}
+        QGroupBox::title {{ subcontrol-origin: margin; left: 9px; padding: 0 4px; }}
+        QPushButton {{
+            min-height: 32px; padding: 0 9px; border: 1px solid {colors['border']};
+            border-radius: 5px; background: {colors['panel']}; color: {colors['text']};
+        }}
+        QPushButton:hover {{ background: {colors['hover']}; }}
+        QPushButton#translateNowButton, QPushButton#openChapterButton {{
+            background: {colors['accent']}; border-color: {colors['accent']};
+            color: #ffffff; font-weight: 600;
+        }}
+        QPushButton#translateNowButton:hover, QPushButton#openChapterButton:hover {{
+            background: {colors['accent_hover']}; border-color: {colors['accent_hover']};
+        }}
+        QComboBox, QSpinBox {{
+            min-height: 29px; padding: 0 6px; border: 1px solid {colors['border']};
+            border-radius: 4px; background: {colors['input']}; color: {colors['text']};
+        }}
+        QComboBox QAbstractItemView, QMenu {{
+            background: {colors['panel']}; color: {colors['text']};
+            selection-background-color: {colors['accent']};
+            selection-color: #ffffff; border: 1px solid {colors['border']};
+        }}
+        QCheckBox, QLabel {{ color: {colors['text']}; }}
+        QStatusBar {{
+            background: {colors['panel']}; color: {colors['muted']};
+            border-top: 1px solid {colors['border']};
+        }}
+        QWidget:disabled {{ color: {colors['muted']}; }}
+    """
+
+
 def run_reader_app(
     config_path: str | None,
     glossary_path: str | None,
@@ -94,7 +182,7 @@ def run_reader_app(
     if platform.system().lower() != "windows":
         raise RuntimeError("The desktop reader is currently implemented for Windows only.")
 
-    from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, Signal, Slot
+    from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl, QSettings, Signal, Slot
     from PySide6.QtGui import QAction, QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
     from PySide6.QtWebEngineCore import QWebEnginePage
     from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -573,6 +661,10 @@ def run_reader_app(
                 launch.config.overlay.font_size,
                 launch.config.overlay.opacity,
             )
+            self.theme_settings = QSettings("UltraOCR", "MangaRealTimeTranslator")
+            self.dark_mode = self.theme_settings.value(
+                "reader/dark_mode", False, type=bool
+            )
             self._base_glossary = copy.deepcopy(launch.glossary)
             self._active_work_identity: tuple[str, str] | None = None
             self._active_work_glossary = Glossary()
@@ -655,6 +747,7 @@ def run_reader_app(
             self.webview.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
             root = QWidget(self)
+            root.setObjectName("readerRoot")
             self.setCentralWidget(root)
             layout = QVBoxLayout(root)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -684,6 +777,13 @@ def run_reader_app(
             history_action.setToolTip("Ver traduções anteriores")
             history_action.triggered.connect(self._show_translation_history)
             self.toolbar.addAction(history_action)
+
+            self.theme_action = QAction("Modo escuro", self)
+            self.theme_action.setCheckable(True)
+            self.theme_action.setChecked(self.dark_mode)
+            self.theme_action.setToolTip("Alternar entre tema claro e escuro")
+            self.theme_action.toggled.connect(self._apply_reader_theme)
+            self.toolbar.addAction(self.theme_action)
 
             self.url_input = QLineEdit(self.launch.initial_url)
             self.url_input.setObjectName("chapterUrlInput")
@@ -887,52 +987,7 @@ def run_reader_app(
             dock.toggleViewAction().setText("Mostrar painel de tradução")
             tools_menu.addAction(dock.toggleViewAction())
 
-            self.setStyleSheet("""
-                QMainWindow { background: #f4f6f6; }
-                QToolBar#navigationToolbar {
-                    background: #ffffff; border: 0; border-bottom: 1px solid #dce3e4;
-                    spacing: 6px; padding: 8px;
-                }
-                QToolBar#navigationToolbar QToolButton,
-                QToolBar#navigationToolbar QPushButton {
-                    min-height: 32px; padding: 0 10px; border: 1px solid #d5dede;
-                    border-radius: 5px; background: #ffffff; color: #263437;
-                }
-                QToolBar#navigationToolbar QToolButton:hover,
-                QToolBar#navigationToolbar QPushButton:hover { background: #edf5f5; }
-                QLineEdit#chapterUrlInput {
-                    min-height: 32px; padding: 0 10px; border: 1px solid #cbd6d8;
-                    border-radius: 5px; background: #fbfcfc; color: #182529;
-                }
-                QLineEdit#chapterUrlInput:focus { border: 1px solid #07838a; }
-                QDockWidget#translationDock { background: #f7f9f9; }
-                QDockWidget#translationDock::title {
-                    background: #edf2f2; padding: 9px 12px; font-weight: 600;
-                    border-bottom: 1px solid #dce3e4;
-                }
-                QGroupBox {
-                    font-weight: 600; border: 1px solid #dce3e4; border-radius: 5px;
-                    margin-top: 10px; padding: 12px 8px 8px; background: #ffffff;
-                }
-                QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 4px; }
-                QPushButton {
-                    min-height: 32px; padding: 0 9px; border: 1px solid #d2dddd;
-                    border-radius: 5px; background: #ffffff; color: #263437;
-                }
-                QPushButton:hover { background: #edf5f5; }
-                QPushButton#translateNowButton, QPushButton#openChapterButton {
-                    background: #087f86; border-color: #087f86; color: #ffffff;
-                    font-weight: 600;
-                }
-                QPushButton#translateNowButton:hover, QPushButton#openChapterButton:hover {
-                    background: #066d74; border-color: #066d74;
-                }
-                QComboBox, QSpinBox {
-                    min-height: 29px; padding: 0 6px; border: 1px solid #d2dddd;
-                    border-radius: 4px; background: #ffffff;
-                }
-                QStatusBar { background: #ffffff; border-top: 1px solid #dce3e4; }
-            """)
+            self.setStyleSheet(_reader_stylesheet(self.dark_mode))
 
             layout.addWidget(self.webview, stretch=1)
 
@@ -947,6 +1002,11 @@ def run_reader_app(
             self.status.showMessage(
                 "Leitor pronto. Selecione uma região para traduzir automaticamente, ou use Traduzir região (Ctrl+Shift+T)."
             )
+
+        def _apply_reader_theme(self, dark: bool) -> None:
+            self.dark_mode = dark
+            self.setStyleSheet(_reader_stylesheet(dark))
+            self.theme_settings.setValue("reader/dark_mode", dark)
 
         def resizeEvent(self, event: object) -> None:  # noqa: N802
             super().resizeEvent(event)

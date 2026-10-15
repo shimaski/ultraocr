@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QSettings
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -29,6 +29,8 @@ class _NoHotkeys:
 
 def test_real_reader_overlay_paints_translation_at_detected_bubble_anchor(monkeypatch):
     app = QApplication.instance() or QApplication([])
+    settings = QSettings("UltraOCR", "MangaRealTimeTranslator")
+    settings.remove("reader/dark_mode")
     monkeypatch.setattr(QApplication, "exec", lambda _self: 0)
     monkeypatch.setattr(reader_module, "load_config", lambda _path: AppConfig())
     monkeypatch.setattr(reader_module, "resolve_glossary_path", lambda _path: None)
@@ -43,6 +45,12 @@ def test_real_reader_overlay_paints_translation_at_detected_bubble_anchor(monkey
     window = reader_module._ACTIVE_WINDOW
     assert window is not None
     try:
+        assert not window.theme_action.isChecked()
+        window.theme_action.setChecked(True)
+        assert "background: #171b1e" in window.styleSheet()
+        assert settings.value("reader/dark_mode", type=bool)
+        window.theme_action.setChecked(False)
+        assert "background: #f4f6f6" in window.styleSheet()
         assert window.source_combo.currentData() == "Auto"
         assert warmed_configs[0].extra_langs == ["japan"]
         assert window.launch.config.ocr.extra_langs == []
@@ -183,6 +191,7 @@ def test_real_reader_overlay_paints_translation_at_detected_bubble_anchor(monkey
         assert overlay._items_token.generation == next_token.generation
         window.runtime = None
     finally:
+        settings.remove("reader/dark_mode")
         window.runtime = None
         window.close()
         app.processEvents()

@@ -94,8 +94,9 @@ O app não modifica o site original — tudo acontece em uma janela overlay por 
 | Atalhos globais Windows para traduzir/limpar região | ✅ |
 | Perfis locais por site (região e preferências, sem chaves) | ✅ |
 | Aparência do overlay por site (fonte, tamanho e opacidade) | ✅ |
+| Tema claro/escuro persistente para a interface do leitor | ✅ |
 | Interface 100% em português | ✅ |
-| 194 testes automatizados | ✅ |
+| Testes automatizados | ✅ |
 
 ---
 
@@ -706,7 +707,10 @@ preservar entradas existentes; o arquivo não inclui histórico nem cache visual
 
 - [ ] Empacotamento: instalador Inno Setup + ícone + atalho
 - [ ] Calibração do detector comic para fonte manuscrita
-- [ ] Tema escuro para o leitor e suas janelas de ferramentas
+
+O leitor oferece alternância claro/escuro pela barra superior e lembra a escolha
+localmente. O tema afeta os controles do aplicativo; a página do site e as imagens
+do mangá permanecem sem alterações.
 
 ### Médio Prazo
 
