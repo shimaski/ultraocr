@@ -1,6 +1,6 @@
 # UltraOCR — Manga Real-Time Translator
 
-Tradutor em tempo real de mangás/webtoons para desktop Windows. Captura a tela, faz OCR local, traduz pela internet e sobrepõe a tradução em português (pt-BR) sobre o texto original.
+Tradutor e leitor em tempo real para mangás, manhwas, manhuas e HQs no Windows. Captura a janela/página, faz OCR local, traduz para português brasileiro (pt-BR) e mostra a tradução em um overlay sem modificar o site.
 
 ---
 
@@ -95,25 +95,35 @@ O app não modifica o site original — tudo acontece em uma janela overlay por 
 | Perfis locais por site (região e preferências, sem chaves) | ✅ |
 | Aparência do overlay por site (fonte, tamanho e opacidade) | ✅ |
 | Interface 100% em português | ✅ |
-| 193 testes automatizados | ✅ |
+| 194 testes automatizados | ✅ |
 
 ---
 
 ## Capturas de Tela
 
-<!-- Adicionar screenshots aqui -->
+### Leitor
 
-```
-Leitor com overlay traduzindo mangá em tempo real:
-┌─────────────────────────────────┐
-│  [Navegador com mangá]          │
-│  ┌───────────────────┐          │
-│  │  "Olá, mundo!"    │ ← overlay│
-│  └───────────────────┘          │
-│  ┌───────────────────┐          │
-│  │  "Como vai você?" │ ← overlay│
-│  └───────────────────┘          │
-└─────────────────────────────────┘
+Recorte real do painel do leitor: controles de OCR/tradução, seleção de região,
+idiomas e provedores. O conteúdo de terceiros da página foi excluído da imagem.
+
+![Painel real do leitor UltraOCR](docs/media/reader-controls.png)
+
+### Como funciona
+
+![Pipeline de captura, OCR, memória de tradução e overlay](docs/media/pipeline.png)
+
+Os GIFs abaixo são simulações visuais do fluxo e da rolagem; as falas são texto
+de demonstração, não uma captura de tradução ao vivo.
+
+![Demonstração ilustrativa: abrir, reconhecer e sobrepor a tradução](docs/media/reader-workflow.gif)
+
+![Demonstração ilustrativa: atualização incremental ao rolar a página](docs/media/scroll-stream.gif)
+
+Para recriar o diagrama e os GIFs:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install -e ".[readme-media]"
+.\.venv311\Scripts\python.exe scripts\generate_readme_visuals.py
 ```
 
 ---
@@ -194,6 +204,21 @@ $env:MANGA_RT_LIBRE_API_KEY = "sua-chave"
 ```powershell
 START_READER.bat
 ```
+
+### Executável de inicialização (Windows)
+
+O repositório inclui os scripts para gerar `UltraOCR.exe`, um launcher que abre
+o leitor sem deixar um terminal visível. Para gerá-lo neste computador:
+
+```powershell
+.\.venv311\Scripts\python.exe -m pip install -e ".[packaging]"
+.\packaging\build_windows.ps1
+.\dist\UltraOCR-local\UltraOCR.exe
+```
+
+Esse EXE é um iniciador local, não um pacote portátil: requer a pasta do projeto,
+o ambiente `.venv311` e as dependências/modelos instalados. As configurações e o
+banco de traduções ficam em `%LOCALAPPDATA%\UltraOCR`.
 
 ---
 
@@ -572,9 +597,10 @@ manga_rt_translator/
   ui.py                 painel de controle
   work_queue.py         mailbox de último frame
 
-  tests/                  193 testes automatizados
-scripts/                scripts de validação e benchmark
-docs/                   documentação do projeto
+tests/                 testes automatizados
+scripts/               validação, benchmark e mídia do README
+docs/                  documentação e imagens de demonstração
+packaging/             launcher local para Windows
 ```
 
 ---
@@ -639,7 +665,7 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 # Rodar todos os testes
 .\.venv311\Scripts\python.exe -m pytest tests -q
 
-# Resultado esperado: 193 passed
+# Resultado esperado: 194 passed
 ```
 
 ### Cobertura
@@ -653,6 +679,10 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 - Rate limiter
 
 ---
+
+A memória textual também pode ser importada/exportada em JSON versionado pelo
+botão **Memória** no leitor. A importação é atômica e permite substituir ou
+preservar entradas existentes; o arquivo não inclui histórico nem cache visual.
 
 ## Problemas Conhecidos
 
@@ -676,6 +706,7 @@ manga-rt-translator ui --config config.toml --glossary glossary.toml
 
 - [ ] Empacotamento: instalador Inno Setup + ícone + atalho
 - [ ] Calibração do detector comic para fonte manuscrita
+- [ ] Tema escuro para o leitor e suas janelas de ferramentas
 
 ### Médio Prazo
 

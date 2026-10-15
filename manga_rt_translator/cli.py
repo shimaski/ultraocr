@@ -275,3 +275,7 @@ def _start_stats_writer(
     worker = threading.Thread(target=_writer, daemon=True)
     worker.start()
     return worker
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

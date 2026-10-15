@@ -90,6 +90,7 @@ def run_reader_app(
     glossary_path: str | None,
     initial_url: str | None = None,
 ) -> int:
+    _reader_log("startup.begin")
     if platform.system().lower() != "windows":
         raise RuntimeError("The desktop reader is currently implemented for Windows only.")
 
@@ -2146,6 +2147,7 @@ def run_reader_app(
         return QApplication.instance() or QApplication([])
 
     app = _create_app()
+    _reader_log("startup.qt_application_ready")
     resolved_glossary_path = resolve_glossary_path(glossary_path)
     launch = ReaderLaunchContext(
         config=load_config(config_path),
@@ -2159,11 +2161,17 @@ def run_reader_app(
     if warmup_config.source_lang != "japan" and "japan" not in warmup_config.extra_langs:
         warmup_config.extra_langs.append("japan")
     warmup_ocr(warmup_config)
+    _reader_log("startup.ocr_warmup_started")
     global _ACTIVE_WINDOW
+    _reader_log("startup.window_create_begin")
     window = ReaderWindow(launch)
+    _reader_log("startup.window_create_complete")
     _ACTIVE_WINDOW = window
     window.show()
-    return int(app.exec())
+    _reader_log("startup.window_shown")
+    result = int(app.exec())
+    _reader_log(f"startup.event_loop_exit code={result}")
+    return result
 
 
 @dataclass

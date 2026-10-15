@@ -40,6 +40,12 @@ offline = [
 dev = [
   "pytest>=8.0",
 ]
+packaging = [
+  "pyinstaller>=6.10,<7",
+]
+readme-media = [
+  "Pillow>=10",
+]
 
 [project.scripts]
 manga-rt-translator = "manga_rt_translator.cli:main"

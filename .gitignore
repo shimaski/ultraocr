@@ -78,3 +78,14 @@ _models/
 *.pt.onnx
 *.onnx
 _
+
+# Local-only build experiments and generated media demos
+packaging/cx-smoke/
+packaging/cx-smoke-console/
+packaging/deployment/
+packaging/pyside610-test/
+packaging/QtSmoke.dist/
+!docs/media/
+docs/media/*
+!docs/media/*.png
+!docs/media/*.gif
