@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UltraOCR live reader test page</title>
+  <style>
+    :root { color-scheme: light; font-family: Georgia, "Times New Roman", serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #deded9; }
+    body { padding: 22px 18px 52px; }
+    .page {
+      width: min(700px, 100%);
+      margin: 0 auto;
+      padding: 12px;
+      border: 3px solid #171717;
+      background: #fff;
+      box-shadow: 0 10px 28px #0002;
+    }
+    .panel {
+      position: relative;
+      height: 800px;
+      overflow: hidden;
+      border: 3px solid #171717;
+      background: #e9e9e5;
+    }
+    .panel + .panel { margin-top: 12px; }
+    .horizon {
+      position: absolute;
+      inset: auto 0 0;
+      height: 34%;
+      border-top: 3px solid #222;
+      background: #bfc2bd;
+    }
+    .clock {
+      position: absolute;
+      left: 8%;
+      bottom: 20%;
+      width: 176px;
+      aspect-ratio: 1;
+      border: 8px solid #272727;
+      border-radius: 50%;
+      background: #f8f8f5;
+    }
+    .clock::before, .clock::after {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      content: "";
+      transform-origin: left center;
+      background: #222;
+    }
+    .clock::before { width: 51px; height: 5px; transform: rotate(-90deg); }
+    .clock::after { width: 63px; height: 4px; transform: rotate(22deg); }
+    .figure {
+      position: absolute;
+      right: 14%;
+      bottom: 13%;
+      width: 74px;
+      height: 190px;
+      border-radius: 36px 36px 8px 8px;
+      background: #4b4b4b;
+    }
+    .figure::before {
+      position: absolute;
+      top: -66px;
+      left: 8px;
+      width: 58px;
+      height: 64px;
+      border: 3px solid #222;
+      border-radius: 50%;
+      background: #d2d2ce;
+      content: "";
+    }
+    .bubble {
+      position: absolute;
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      width: 350px;
+      min-height: 154px;
+      padding: 20px 28px;
+      border: 3px solid #171717;
+      border-radius: 48%;
+      background: #fff;
+      color: #111;
+      text-align: center;
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    .bubble-one { top: 42px; right: 24px; }
+    .bubble-two { top: 278px; left: 28px; width: 320px; min-height: 142px; }
+    .train {
+      position: absolute;
+      right: -8%;
+      bottom: 19%;
+      width: 74%;
+      height: 180px;
+      border: 5px solid #222;
+      background: #bfc2bd;
+    }
+    .train::before, .train::after {
+      position: absolute;
+      top: 32px;
+      width: 82px;
+      height: 70px;
+      border: 4px solid #222;
+      background: #ededeb;
+      content: "";
+    }
+    .train::before { left: 28px; }
+    .train::after { left: 132px; }
+    .platform-line {
+      position: absolute;
+      right: 0;
+      bottom: 15%;
+      left: 0;
+      height: 8px;
+      background: #222;
+      box-shadow: 0 20px 0 #777;
+    }
+    .bubble-three { top: 60px; left: 50%; transform: translateX(-50%); width: 390px; }
+    @media (max-width: 620px) {
+      body { padding: 10px; }
+      .panel { height: 560px; }
+      .bubble { width: 58%; min-height: 130px; padding: 16px; font-size: 23px; }
+      .bubble-one { right: 12px; }
+      .bubble-two { left: 12px; }
+      .bubble-three { width: 65%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page" aria-label="Original OCR and translation test comic">
+    <section class="panel" aria-label="The clock tower">
+      <div class="clock" aria-hidden="true"></div>
+      <div class="figure" aria-hidden="true"></div>
+      <div class="horizon" aria-hidden="true"></div>
+      <div class="bubble bubble-one">Wait for me beneath the old clock.</div>
+      <div class="bubble bubble-two">I will be there before sunset.</div>
+    </section>
+    <section class="panel" aria-label="The station">
+      <div class="train" aria-hidden="true"></div>
+      <div class="platform-line" aria-hidden="true"></div>
+      <div class="bubble bubble-three">We walk home together tonight.</div>
+    </section>
+  </main>
+</body>
+</html>

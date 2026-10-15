@@ -118,11 +118,31 @@ O GIF mostra o mesmo painel alternando entre os dois temas:
 
 ![Capturas reais da alternância de tema no leitor](docs/media/reader-theme-toggle.gif)
 
+### OCR e tradução em execução
+
+Esta gravação mostra o leitor real reconhecendo duas falas em inglês e exibindo
+as traduções em PT-BR no overlay após acionar **Traduzir agora**. A página do
+quadrinho é um cenário original de teste, incluído para reproduzir o fluxo sem
+redistribuir páginas de terceiros. OCR e tradução passam pelo runtime normal do
+app, sem textos de overlay preparados para a gravação. Nesta sessão, o Google
+respondeu HTTP 429 e a cadeia de fallback concluiu as traduções via MyMemory;
+nenhum bloqueio foi contornado.
+
+![Leitor real reconhecendo e traduzindo falas para PT-BR](docs/media/reader-live-translation.gif)
+
 Para refazer as capturas da interface no Windows, com OCR e rede desativados:
 
 ```powershell
 .\.venv311\Scripts\python.exe -m pip install -e ".[readme-media]"
 .\.venv311\Scripts\python.exe scripts\capture_readme_media.py
+```
+
+Para gravar novamente o fluxo funcional, use o comando abaixo. Ele precisa de
+PaddleOCR e conexão com um provedor de tradução; não grava se não validar pelo
+menos duas falas traduzidas no overlay.
+
+```powershell
+.\.venv311\Scripts\python.exe scripts\record_live_readme_demo.py
 ```
 
 ---
