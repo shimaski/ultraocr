@@ -35,6 +35,17 @@ def _no_cancel() -> None:
     pass
 
 
+def resolve_cpu_threads(config: object) -> int:
+    """Threads for PaddleOCR CPU inference. ``ocr.cpu_threads = 0`` means auto:
+    min(8, cpu_count). Paddle's CPU recognizer scales sublinearly, so 8 is a
+    safe ceiling that still shortens dense pages on many-core machines without
+    starving the UI (OCR already runs below-normal priority)."""
+    requested = int(getattr(config, "cpu_threads", 0) or 0)
+    if requested > 0:
+        return requested
+    return max(1, min(8, os.cpu_count() or 4))
+
+
 class OcrEngine:
     def recognize(self, image: np.ndarray, regions: Iterable[Rect]) -> list[TextRegion]:
         raise NotImplementedError
@@ -67,9 +78,10 @@ class PaddleOcrEngine(OcrEngine):
 
     def recognize_cancellable(self, image: np.ndarray, regions: Iterable[Rect],
                               check: Callable[[], None]) -> list[TextRegion]:
-        """Recognize each candidate region independently and group lines
-        within it. Candidates are bubble-sized areas, so lines from different
-        balloons never get merged into each other's blocks."""
+        """Recognize each candidate region independently, then group all
+        detected lines in page coordinates. Candidate boundaries can split a
+        real text block; global grouping reunites those pieces while the
+        separator and geometry checks keep neighboring balloons apart."""
         output: list[TextRegion] = []
         for region in regions:
             check()
@@ -83,8 +95,10 @@ class PaddleOcrEngine(OcrEngine):
                 for item in best_regions
                 if item.text.strip() and item.confidence >= self.config.min_confidence
             ]
+            # Collapse obvious lines within a candidate first, which keeps
+            # the cross-candidate reconciliation set small on dense pages.
             output.extend(group_text_regions(lines, image))
-        return output
+        return group_text_regions(output, image)
 
     def _recognize_with_retry(
         self,
@@ -126,6 +140,7 @@ class PaddleOcrEngine(OcrEngine):
         ):
             return best_regions
 
+        self.upscale_retries = getattr(self, "upscale_retries", 0) + 1
         scaled = cv2.resize(
             crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
         )
@@ -216,6 +231,7 @@ class PaddleOcrEngine(OcrEngine):
         full_image: np.ndarray,
         check: Callable[[], None] = _no_cancel,
     ) -> list[TextRegion]:
+        self.engine_calls = getattr(self, "engine_calls", 0) + 1
         # Cached Paddle predictors are shared with warmup and restarted readers.
         with _INFERENCE_LOCK:
             check()
@@ -239,7 +255,7 @@ class PaddleOcrEngine(OcrEngine):
             "lang": lang,
             "device": "cpu",
             "enable_mkldnn": False,
-            "cpu_threads": 4,
+            "cpu_threads": resolve_cpu_threads(self.config),
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
@@ -607,6 +623,9 @@ def create_ocr_engine(config: OcrConfig) -> OcrEngine:
     if config.detector == "hybrid":
         from manga_rt_translator.hybrid_ocr import HybridOcrEngine
         return HybridOcrEngine(config)
+    if getattr(config, "detector", "paddle") == "rapid":
+        from manga_rt_translator.rapid_ocr import RapidOcrEngine
+        return RapidOcrEngine(config)
     if getattr(config, "detector", "paddle") == "comic":
         return ComicTextOcr(config)
     return PaddleOcrEngine(config)
@@ -835,12 +854,78 @@ def _same_block(left: TextRegion, right: TextRegion) -> bool:
     y_gap = max(a.y, b.y) - min(a.y2, b.y2)
     y_overlap = min(a.y2, b.y2) - max(a.y, b.y)
     x_gap = max(a.x, b.x) - min(a.x2, b.x2)
-    if y_overlap >= 0.65 * min(a.height, b.height) and 0 <= x_gap <= min(24, min(a.height, b.height)):
+    # Side-by-side boxes only belong together when they are the same lettering
+    # size. A line inside one balloon comes back as a single detector box;
+    # neighbouring boxes of a different size are a sound effect or the next
+    # balloon, and joining them chained a whole panel into one garbled block.
+    if (
+        y_overlap >= 0.65 * min(a.height, b.height)
+        and 0 <= x_gap <= min(24, min(a.height, b.height))
+        and height_ratio <= 1.3
+    ):
         return True
     return (
         x_overlap >= 0.45 * min(a.width, b.width)
         and -0.6 * min(a.height, b.height) <= y_gap <= 1.4 * min(a.height, b.height)
     )
+
+
+_ENCLOSURE_CACHE: dict[str, object] = {"key": None, "labels": None}
+
+
+def _enclosure_labels(
+    image: np.ndarray | None, regions: list[TextRegion]
+) -> list[tuple[str, int] | None]:
+    """Which closed light area (balloon interior) each OCR line sits in.
+
+    Dark ink is a wall; the light pixels around a line's letters belong to one
+    connected component per balloon, so two lines in different balloons get
+    different ids. Lines on dark or busy art (little light space around the
+    letters) get None and fall back to the geometric rules.
+    """
+    if image is None or not regions or image.ndim != 3 or image.shape[2] < 3:
+        return [None] * len(regions)
+    # Preferred: the comic text/balloon detector (one label per text block).
+    from manga_rt_translator.comic_detector import block_index_for, detect_cached
+
+    detections = detect_cached(image)
+    if detections is not None and detections.texts:
+        detector_labels: list[tuple[str, int] | None] = []
+        for region in regions:
+            index = block_index_for(region.bbox, detections.texts)
+            detector_labels.append(("det", index) if index is not None else None)
+        if any(label is not None for label in detector_labels):
+            return detector_labels
+    key = (id(image), image.shape, image.__array_interface__["data"][0])
+    if _ENCLOSURE_CACHE["key"] == key:
+        labels = _ENCLOSURE_CACHE["labels"]
+    else:
+        gray = cv2.cvtColor(np.ascontiguousarray(image[:, :, :3]), cv2.COLOR_RGB2GRAY)
+        ink = cv2.dilate(
+            (gray < 110).astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1
+        )
+        _, labels = cv2.connectedComponents(1 - ink, connectivity=4)
+        _ENCLOSURE_CACHE["key"] = key
+        _ENCLOSURE_CACHE["labels"] = labels
+    assert isinstance(labels, np.ndarray)
+    height, width = labels.shape[:2]
+    result: list[tuple[str, int] | None] = []
+    for region in regions:
+        box = region.bbox
+        x1, y1 = max(0, box.x - 4), max(0, box.y - 4)
+        x2, y2 = min(width, box.x2 + 4), min(height, box.y2 + 4)
+        sub = labels[y1:y2, x1:x2]
+        values = sub[sub > 0]
+        if sub.size == 0 or values.size == 0:
+            result.append(None)
+            continue
+        ids, counts = np.unique(values, return_counts=True)
+        best = int(counts.argmax())
+        if counts[best] < 0.35 * sub.size:
+            result.append(None)
+            continue
+        result.append(("light", int(ids[best])))
+    return result
 
 
 def _has_separator(image: np.ndarray | None, a: Rect, b: Rect) -> bool:
@@ -895,6 +980,7 @@ def group_text_regions(
     else reads top-to-bottom, left-to-right.
     """
     regions = _dedup_overlapping_lines(regions)
+    enclosure = _enclosure_labels(image, regions)
 
     parent = list(range(len(regions)))
 
@@ -906,6 +992,21 @@ def group_text_regions(
 
     for i in range(len(regions)):
         for j in range(i + 1, len(regions)):
+            if (
+                enclosure[i] is not None
+                and enclosure[j] is not None
+            ):
+                if enclosure[i] != enclosure[j]:
+                    # Different detected text blocks / closed balloons:
+                    # never one caption.
+                    continue
+                if enclosure[i][0] == "det":
+                    # Same block of the comic text detector: one caption,
+                    # however the lines are spaced or sized.
+                    root_j = find(j)
+                    if root_j != find(i):
+                        parent[root_j] = find(i)
+                    continue
             if (_same_block(regions[i], regions[j])
                     and not _has_separator(image, regions[i].bbox, regions[j].bbox)):
                 root_j = find(j)

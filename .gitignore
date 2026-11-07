@@ -12,6 +12,8 @@ reader_debug_output/
 reader_stderr.log
 reader_stdout.log
 *.bak
+*.bak-*
+*.bak[0-9]*
 .cache/
 dist/
 build/
@@ -89,3 +91,21 @@ packaging/QtSmoke.dist/
 docs/media/*
 !docs/media/*.png
 !docs/media/*.gif
+
+# Investigation / reverse-engineering artifacts — kept out of the repo.
+# These are large local-only captures and probes, not app source.
+*.apk
+*.pcap
+*.pcapng
+*.traineddata
+nuitka-crash-report.xml
+# Frida / endpoint probes left in the project root.
+tap_*.js
+tap_*.txt
+hook_sku.js
+# Multi-megabyte REA evidence dumps.
+*evidence*.json
+gaminik-*-evidence.json
+gaminik_native_analysis/
+# Stray artifact created by an unquoted `pip install pkg>=1.11`.
+=*

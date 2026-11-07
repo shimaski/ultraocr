@@ -2,7 +2,17 @@ numpy>=1.24,<2.0
 opencv-python==4.10.0.84
 dxcam>=0.0.5; platform_system == "Windows"
 windows-capture==2.0.1; platform_system == "Windows"
+# OCR stack. paddlex is the pipeline PaddleOCR 3.x runs on; it is imported
+# indirectly and must be present. Validated locally with paddlepaddle 3.3.1
+# (the oneDNN workaround in ocr.py targets that build).
 paddleocr>=2.8.0
-PySide6>=6.6
+paddlex>=3.0
+paddlepaddle>=3.0
+# PySide6 6.11 ships a QWebEngineView child-widget lifecycle bug (see
+# CONTEXT.md); the app works on it with the top-level-overlay mitigation, but
+# cap the range so a fresh install does not pull an untested newer major.
+PySide6>=6.6,<6.12
 onnxruntime-directml>=1.17; platform_system == "Windows"
 rapidfuzz>=3.6
+# Optional: ONNX Runtime OCR backend, enabled with [ocr] detector = "rapid".
+# rapidocr-onnxruntime>=1.2

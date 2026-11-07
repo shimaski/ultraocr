@@ -17,18 +17,27 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('image', type=Path)
     parser.add_argument('--output', type=Path, default=Path('reader_debug_output/ocr_benchmark.json'))
-    parser.add_argument('--detector', action='append', choices=['paddle', 'hybrid'],
-                        help='Detector to benchmark; may be repeated (default: both).')
+    parser.add_argument('--detector', action='append',
+                        choices=['paddle', 'hybrid', 'comic', 'rapid'],
+                        help='Detector to benchmark; may be repeated (default: paddle + hybrid).')
+    parser.add_argument('--cpu-threads', type=int, default=0,
+                        help='OCR CPU threads (0 = auto: min(8, cpu_count)).')
+    parser.add_argument('--max-input-side', type=int, default=640,
+                        help='Cap the longer side of large crops before OCR.')
     args = parser.parse_args()
     raw = cv2.imread(str(args.image))
     if raw is None:
         raise SystemExit(f'Cannot read {args.image}')
     image = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
     full = Rect(0, 0, image.shape[1], image.shape[0])
-    report = {'image': str(args.image.resolve()), 'runs': []}
+    report = {'image': str(args.image.resolve()),
+              'cpu_threads': args.cpu_threads, 'max_input_side': args.max_input_side,
+              'runs': []}
     for detector in (args.detector or ['paddle', 'hybrid']):
         started = time.perf_counter()
-        engine = create_ocr_engine(OcrConfig(detector=detector))
+        engine = create_ocr_engine(OcrConfig(
+            detector=detector, cpu_threads=args.cpu_threads,
+            max_input_side=args.max_input_side))
         for stage in ('cold', 'warm'):
             if stage == 'warm':
                 started = time.perf_counter()

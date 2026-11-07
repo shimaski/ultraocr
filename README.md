@@ -261,8 +261,12 @@ det_model = "mobile"
 extra_langs = []
 
 [translation]
-# Provedor padrão: "google", "gemini", "deepl", "libre", "echo"
+# Provedor padrão: "google", "gemini", "deepl", "libre", "aihub", "echo"
 provider = "gemini"
+
+# Aihub usa a identidade real do UltraOCR; o backend precisa autorizá-la.
+# aihub_app_package = "com.ultraocr"
+# aihub_engine = "gemini"
 
 # Idioma de destino
 target_lang = "pt-BR"

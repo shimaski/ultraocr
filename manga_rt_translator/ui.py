@@ -10,7 +10,7 @@ from pathlib import Path
 
 from manga_rt_translator.capture.windows_windows import WindowInfo, list_visible_windows
 from manga_rt_translator.cache import TranslationMemory
-from manga_rt_translator.config import AppConfig, load_config
+from manga_rt_translator.config import AppConfig, configure_logging, load_config
 from manga_rt_translator.glossary import Glossary, resolve_glossary_path
 
 
@@ -520,7 +520,7 @@ def run_control_panel(config_path: str | None, glossary_path: str | None) -> int
 
             controls.addWidget(QLabel("Provedor"), 1, 0)
             self.mode_combo = QComboBox()
-            self.mode_combo.addItems(["Google", "DeepL", "Gemini", "Libre", "Argos offline", "Echo"])
+            self.mode_combo.addItems(["Google", "DeepL", "Gemini", "Libre", "Aihub", "Argos offline", "Echo"])
             self.mode_combo.currentTextChanged.connect(self._sync_mode_ui)
             controls.addWidget(self.mode_combo, 1, 1)
 
@@ -536,7 +536,8 @@ def run_control_panel(config_path: str | None, glossary_path: str | None) -> int
             self.korean_checkbox.setChecked("korean" in self.base_config.ocr.extra_langs)
             controls.addWidget(self.korean_checkbox, 2, 0, 1, 2)
 
-            controls.addWidget(QLabel("Chave de API"), 2, 2)
+            self.provider_key_label = QLabel("Chave de API")
+            controls.addWidget(self.provider_key_label, 2, 2)
             self.deepl_key_input = QLineEdit()
             self.deepl_key_input.textChanged.connect(self._remember_active_api_key)
             controls.addWidget(self.deepl_key_input, 2, 3, 1, 3)
@@ -737,7 +738,17 @@ def run_control_panel(config_path: str | None, glossary_path: str | None) -> int
                 "deepl": "Chave de API DeepL",
                 "gemini": "Chave Gemini AI Studio",
                 "libre": "Chave LibreTranslate (opcional)",
+                "aihub": "Identidade do app; backend precisa autorizá-la",
             }
+            if provider == "aihub":
+                self.deepl_key_input.setText(
+                    str(self.base_config.translation.aihub_app_package or "com.ultraocr")
+                )
+                self.provider_key_label.setText("Identidade do app")
+                self.deepl_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            else:
+                self.provider_key_label.setText("Chave de API")
+                self.deepl_key_input.setEchoMode(QLineEdit.EchoMode.Password)
             self.deepl_key_input.setPlaceholderText(
                 placeholders.get(provider, "Este provedor não usa chave")
             )
@@ -879,6 +890,8 @@ def run_control_panel(config_path: str | None, glossary_path: str | None) -> int
                 "translation": {
                     "target_lang": config.translation.target_lang,
                     "provider": config.translation.provider,
+                    "aihub_app_package": config.translation.aihub_app_package,
+                    "aihub_engine": config.translation.aihub_engine,
                     "deepl_free": config.translation.deepl_free,
                     "timeout_seconds": config.translation.timeout_seconds,
                     "fuzzy_threshold": config.translation.fuzzy_threshold,
@@ -950,7 +963,9 @@ def run_control_panel(config_path: str | None, glossary_path: str | None) -> int
 
     app = QApplication.instance() or QApplication([])
     glossary_path = resolve_glossary_path(glossary_path)
-    panel = ControlPanel(load_config(config_path), Glossary.load(glossary_path))
+    config = load_config(config_path)
+    configure_logging(config.logging)
+    panel = ControlPanel(config, Glossary.load(glossary_path))
     panel.show()
     return int(app.exec())
 

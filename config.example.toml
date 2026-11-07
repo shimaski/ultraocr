@@ -29,16 +29,23 @@ ignore_top_pixels = 120
 det_model = "mobile"
 # Recognition model: mobile (fast) | server (better on stylized comic fonts)
 rec_model = "mobile"
-# Text detector: paddle (recommended) | comic (experimental, downloads an
-# additional ~90 MB ONNX model; may be slower or less accurate on some pages)
+# Text detector: paddle (recommended) | rapid (RapidOCR via ONNX Runtime,
+# lighter/faster for English/Latin; needs rapidocr-onnxruntime) | comic
+# (experimental, downloads an additional ~90 MB ONNX model)
 detector = "paddle"
 # Large OCR inputs are reduced proportionally; smaller crops remain unchanged.
 max_input_side = 640
+# CPU threads for OCR inference. 0 = auto (min(8, cpu_count)). Raise on a
+# many-core machine to shorten dense pages; OCR runs below-normal priority.
+cpu_threads = 0
 
 [translation]
 target_lang = "pt-BR"
-# Providers: google | gemini | deepl | libre | argos (offline models) | echo (debug)
+# Providers: google | gemini | deepl | libre | aihub | argos (offline models) | echo (debug)
 provider = "google"
+# Aihub package identity; the backend must authorize this package.
+aihub_app_package = "com.ultraocr"
+aihub_engine = "gemini"
 # deepl_api_key = ""
 # deepl_free = true
 # Minimum spacing between Gemini requests (seconds). Lower = faster, more 429s.
@@ -57,3 +64,47 @@ ttl_seconds = 900
 
 [cache]
 path = "manga_translations.sqlite3"
+
+[rate_limits.google]
+failure_threshold = 3
+open_duration_s = 60
+rps = 4.0
+burst = 10
+quality = 6
+daily_limit = 0
+chars = false
+
+[rate_limits.gemini]
+failure_threshold = 5
+open_duration_s = 180
+rps = 0.5
+burst = 5
+quality = 9
+daily_limit = 1500
+reset_at_utc_hour = 0
+chars = false
+
+[rate_limits.deepl]
+failure_threshold = 3
+open_duration_s = 120
+rps = 1.0
+burst = 3
+quality = 9
+daily_limit = 500000
+reset_at_utc_hour = 1
+chars = true
+
+[rate_limits.libre]
+failure_threshold = 3
+open_duration_s = 60
+rps = 10.0
+burst = 20
+quality = 7
+daily_limit = 0
+chars = false
+
+[logging]
+level = "INFO"
+rate_limiter_periodic_s = 30
+rate_limiter_cache_s = 60
+rate_limiter_emit_per_request = false

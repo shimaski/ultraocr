@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 
-from manga_rt_translator.config import AppConfig, load_config
+from manga_rt_translator.config import AppConfig, configure_logging, load_config
 from manga_rt_translator.capture.windows_capture_affinity import (
     exclude_window_from_dxgi_capture,
 )
@@ -70,6 +70,9 @@ class NullStream:
 def _reader_log(message: str) -> None:
     try:
         path = Path.cwd() / ".reader_debug.log"
+        from manga_rt_translator.reader_runtime import rotate_log
+
+        rotate_log(path)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"[{timestamp}] {message}\n")
@@ -259,6 +262,7 @@ def run_reader_app(
                 | Qt.WindowType.WindowStaysOnTopHint
                 | Qt.WindowType.Tool
                 | Qt.WindowType.WindowTransparentForInput
+                | Qt.WindowType.WindowDoesNotAcceptFocus
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
             self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -330,6 +334,7 @@ def run_reader_app(
             live = [
                 item for item in self.items
                 if item.expires_at is None or item.expires_at > now
+                if not item.source_text or item.text != item.source_text
             ]
             token = getattr(self, '_items_token', None)
             if token is not None and not token.current():
@@ -357,7 +362,11 @@ def run_reader_app(
             # dialogue and leave the small captions more freedom to move.
             for item in sorted(
                 live,
-                key=lambda value: (-value.bbox.area, _overlay_item_key(value)),
+                key=lambda value: (
+                    value.display_bbox is None,
+                    -value.bbox.area,
+                    _overlay_item_key(value),
+                ),
             ):
                 provisional = bool(item.source_text) and item.text == item.source_text
                 source_rect = _offset_rect(
@@ -374,98 +383,176 @@ def run_reader_app(
                     )
                     bubble_bounds = _intersect_paint_rect(
                         PaintRect(
-                            bubble_rect.x,
-                            bubble_rect.y,
-                            bubble_rect.width,
-                            bubble_rect.height,
+                            bubble_rect.x, bubble_rect.y,
+                            bubble_rect.width, bubble_rect.height,
                         ),
                         bounds,
                     )
+                    if bubble_bounds is not None and (
+                        bubble_bounds.width < 36 or bubble_bounds.height < 36
+                    ):
+                        bubble_bounds = None
                 chosen: tuple[PaintRect, QFont] | None = None
-                displaced_fallback: tuple[PaintRect, QFont] | None = None
-                # Dense comic pages need smaller type. Try the configured size
-                # first, then compact only as much as collision avoidance needs.
-                for point_size in range(base_font_size, 8, -1):
+                # Adapt text size to page density automatically. If captions
+                # still touch, keep them attached to their source regions and
+                # try only a small nudge; never silently discard a translation.
+                smallest_fit: tuple[PaintRect, QFont] | None = None
+                # Inside a detected balloon the balloon itself bounds the text,
+                # so start large and shrink until it fits; page density only
+                # matters for free-floating captions that can collide.
+                if bubble_bounds is not None:
+                    max_point_size = max(configured_font_size, 18) + 4
+                else:
+                    max_point_size = min(base_font_size, 16)
+                for point_size in range(max_point_size, 5, -1):
                     font = QFont(self.overlay_config.font_family, point_size)
                     font.setBold(True)
                     font.setItalic(provisional)
                     painter.setFont(font)
-                    rect = _fit_rect(source_rect, self.width(), self.height(), item.text)
                     if bubble_bounds is not None:
-                        width = min(rect.width, bubble_bounds.width)
-                        height = min(rect.height, bubble_bounds.height)
-                        rect = PaintRect(
-                            x=bubble_bounds.x + (bubble_bounds.width - width) // 2,
-                            y=bubble_bounds.y + (bubble_bounds.height - height) // 2,
-                            width=width,
-                            height=height,
+                        metrics = painter.fontMetrics()
+                        wrap_flags = int(
+                            Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter
                         )
-                    rect = _fit_text_rect(
-                        rect,
-                        item.text,
-                        painter,
-                        bounds.y + bounds.height,
-                        int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter),
-                        QRect,
-                    )
+
+                        def measure(wrap_width: int, _m=metrics, _f=wrap_flags,
+                                    _t=item.text) -> tuple[int, int]:
+                            box = _m.boundingRect(QRect(0, 0, wrap_width, 100_000), _f, _t)
+                            return box.width(), box.height()
+
+                        longest_word = max(
+                            (metrics.horizontalAdvance(word) for word in item.text.split()),
+                            default=0,
+                        )
+                        fitted = fit_text_in_ellipse(
+                            bubble_bounds.width, bubble_bounds.height,
+                            measure, longest_word,
+                        )
+                        if fitted is None:
+                            continue
+                        wrap_width, block_height = fitted
+                        # Never let the translation grow far past the space the
+                        # original lettering used: a large light area detected
+                        # as a "balloon" (title pages, white backgrounds) made
+                        # the text balloon up and cover the artwork.
+                        block_width = measure(wrap_width)[0]
+                        source_area = max(1, source_rect.width * source_rect.height)
+                        if (
+                            block_width * block_height > 1.8 * source_area
+                            and point_size > 8
+                        ):
+                            continue
+                        # The painter draws inside (x+10, y+8, w-20, h-16).
+                        rect = PaintRect(
+                            x=bubble_bounds.x + (bubble_bounds.width - (wrap_width + 20)) // 2,
+                            y=bubble_bounds.y + (bubble_bounds.height - (block_height + 16)) // 2,
+                            width=wrap_width + 20,
+                            height=block_height + 16,
+                        )
+                    else:
+                        margin_x = max(8, min(20, source_rect.width // 6))
+                        margin_y = max(10, min(24, source_rect.height // 4))
+                        rect = _intersect_paint_rect(
+                            PaintRect(
+                                source_rect.x - margin_x,
+                                source_rect.y - margin_y,
+                                source_rect.width + margin_x * 2,
+                                source_rect.height + margin_y * 2,
+                            ),
+                            bounds,
+                        )
+                        if rect is None:
+                            continue
+                        metrics = painter.fontMetrics()
+                        content_width = max(1, rect.width - 20)
+                        content_height = max(1, rect.height - 16)
+                        text_block = metrics.boundingRect(
+                            QRect(0, 0, content_width, content_height),
+                            int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter),
+                            item.text,
+                        )
+                        required_height = text_block.height()
+                        longest_word = max(
+                            (metrics.horizontalAdvance(word) for word in item.text.split()),
+                            default=0,
+                        )
+                        if required_height > content_height or longest_word > content_width:
+                            continue
+                        # Shrink the caption to the translated text itself,
+                        # centred on the source lettering. The search area
+                        # above includes generous margins; painting all of it
+                        # covered artwork far beyond the balloon.
+                        tight_width = min(rect.width, text_block.width() + 22)
+                        tight_height = min(rect.height, required_height + 18)
+                        center_x = source_rect.x + source_rect.width // 2
+                        center_y = source_rect.y + source_rect.height // 2
+                        tight_x = min(
+                            max(rect.x, center_x - tight_width // 2),
+                            rect.x + rect.width - tight_width,
+                        )
+                        tight_y = min(
+                            max(rect.y, center_y - tight_height // 2),
+                            rect.y + rect.height - tight_height,
+                        )
+                        rect = PaintRect(tight_x, tight_y, tight_width, tight_height)
                     if rect.width > bounds.width or rect.height > bounds.height:
                         continue
-                    key = _overlay_item_key(item)
-                    retained = self._placements.get(key)
-                    placed = None
-                    if retained is not None:
-                        retained = _clamp_paint_rect(retained, bounds)
-                        close_to_anchor = (
-                            abs(retained.x - rect.x) <= 80
-                            and abs(retained.y - rect.y) <= 80
-                        )
-                        within_bubble = (
-                            bubble_bounds is None
-                            or _paint_rect_contains(bubble_bounds, retained)
-                        )
-                        if close_to_anchor and within_bubble and not any(
-                            _rects_overlap(retained, other) for other in occupied
-                        ):
-                            placed = retained
-                    if placed is None and bubble_bounds is not None:
-                        if (
-                            rect.width <= bubble_bounds.width
-                            and rect.height <= bubble_bounds.height
-                        ):
-                            placed = _place_without_overlap(
-                                rect, occupied, bubble_bounds
-                            )
-                    if placed is not None:
-                        chosen = (placed, font)
+                    smallest_fit = (rect, font)
+                    if not any(_rects_overlap(rect, other, gap=2) for other in occupied):
+                        chosen = (rect, font)
                         break
-                    if displaced_fallback is None:
-                        outside_bubble = _place_without_overlap(
-                            rect, occupied, bounds
-                        )
-                        if outside_bubble is not None:
-                            displaced_fallback = (outside_bubble, font)
                 if chosen is None:
-                    chosen = displaced_fallback
-                if chosen is None:
-                    # An exceptionally crowded viewport is still more useful
-                    # with one caption omitted than with several unreadable
-                    # captions painted on top of each other.
-                    continue
+                    # Prefer a nearby clear spot over overlap. In the rare case
+                    # a crowded page has no clear spot nearby, show the smallest
+                    # caption at its OCR anchor rather than losing the bubble.
+                    if smallest_fit is None:
+                        continue
+                    rect, font = smallest_fit
+                    nearby = _place_without_overlap(
+                        rect, occupied, bounds, gap=2, max_distance=24
+                    )
+                    chosen = (nearby or rect, font)
                 rect, font = chosen
                 self._placements[_overlay_item_key(item)] = rect
                 occupied.append(rect)
                 layout.append((item, rect, font, provisional))
 
-            for item, _, _, provisional in layout:
+            for item, caption_rect, _, provisional in layout:
                 patch = item.background_patch
                 patch_rect = item.background_rect
+                if not provisional and (patch is None or patch_rect is None):
+                    # No erased-background patch (dark/textured art, a failed
+                    # inpaint, or a merged caption): the source lettering would
+                    # show through the translation. Cover the source text area
+                    # and the caption with an opaque fill in the local colour.
+                    fill = item.background_color or (255, 255, 255)
+                    cover = QColor(*fill, max(200, int(255 * self.overlay_config.opacity)))
+                    source_rect = _offset_rect(
+                        _scale_capture_rect(item.bbox, self.capture_scale),
+                        self.viewport_region,
+                    )
+                    # Cover only the original lettering (rounded, small pad).
+                    # Filling the whole caption box too painted blocks over
+                    # artwork outside the balloon; the caption text has its
+                    # own outline for legibility.
+                    source_path = QPainterPath()
+                    source_path.addRoundedRect(
+                        source_rect.x - 3, source_rect.y - 3,
+                        source_rect.width + 6, source_rect.height + 6, 6, 6,
+                    )
+                    painter.fillPath(source_path, cover)
+                    continue
                 if not provisional and patch is not None and patch_rect is not None:
+                    patch_format = (
+                        QImage.Format.Format_RGBA8888
+                        if patch.shape[2] == 4 else QImage.Format.Format_RGB888
+                    )
                     image = QImage(
                         patch.data,
                         patch.shape[1],
                         patch.shape[0],
                         int(patch.strides[0]),
-                        QImage.Format.Format_RGB888,
+                        patch_format,
                     ).copy()
                     scaled_patch_rect = _scale_capture_rect(patch_rect, self.capture_scale)
                     positioned_patch_rect = _offset_rect(
@@ -486,13 +573,8 @@ def run_reader_app(
                 painter.setFont(font)
                 sampled_background = item.background_color
                 text_color = QColor(*foreground_color(sampled_background), 245)
-                has_restored_background = (
-                    item.background_patch is not None and not provisional
-                )
                 bubble = QPainterPath()
                 bubble.addRoundedRect(rect.x, rect.y, rect.width, rect.height, 10, 10)
-                if not has_restored_background:
-                    painter.fillPath(bubble.translated(0, 2), QColor(0, 0, 0, 48))
                 if provisional:
                     provisional_background = sampled_background or (250, 250, 250)
                     provisional_alpha = (
@@ -512,50 +594,27 @@ def run_reader_app(
                         else QColor(96, 96, 96, 235)
                     )
                 else:
-                    background_color = (
-                        QColor(
-                            *sampled_background,
-                            int(255 * self.overlay_config.opacity)
-                            if has_restored_background
-                            else 255,
-                        )
-                        if sampled_background is not None
-                        else QColor(
-                            255,
-                            252,
-                            245,
-                            int(255 * self.overlay_config.opacity),
-                        )
+                    text_x = rect.x + 10
+                    text_y = rect.y + 8
+                    text_width = max(1, rect.width - 20)
+                    text_height = max(1, rect.height - 16)
+                    text_flags = (
+                        Qt.AlignmentFlag.AlignCenter
+                        | Qt.AlignmentFlag.AlignVCenter
+                        | Qt.TextFlag.TextWordWrap
                     )
-                    border_color = (
-                        QColor(36, 31, 28, 110)
-                        if text_color.red() < 128
-                        else QColor(245, 245, 245, 150)
-                    )
-                    painter.fillPath(bubble, background_color)
-                    if not has_restored_background:
-                        painter.setPen(QPen(border_color, 1.2))
-                        painter.drawPath(bubble)
+                    if item.display_bbox is None:
+                        outline = QColor(12, 14, 18, 220) if text_color.red() > 127 else QColor(255, 255, 255, 230)
+                        painter.setPen(outline)
+                        for dx, dy in ((-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)):
+                            painter.drawText(
+                                text_x + dx, text_y + dy, text_width, text_height,
+                                text_flags, item.text,
+                            )
                     painter.setPen(text_color)
-                painter.drawText(
-                    rect.x + 10,
-                    rect.y + 8,
-                    max(1, rect.width - 20),
-                    max(1, rect.height - 16),
-                    Qt.AlignmentFlag.AlignCenter
-                    | Qt.AlignmentFlag.AlignVCenter
-                    | Qt.TextFlag.TextWordWrap,
-                    item.text,
-                )
-
-            if self.viewport_region is not None:
-                painter.setPen(QPen(QColor(68, 186, 255, 190), 1.5, Qt.PenStyle.DashLine))
-                painter.drawRect(
-                    self.viewport_region.x,
-                    self.viewport_region.y,
-                    self.viewport_region.width,
-                    self.viewport_region.height,
-                )
+                    painter.drawText(
+                        text_x, text_y, text_width, text_height, text_flags, item.text
+                    )
 
     class RegionSelectionOverlay(QWidget):
         region_selected = Signal(object)
@@ -680,6 +739,7 @@ def run_reader_app(
             self._overlay_capture_attempted = False
             self._overlay_capture_method = ""
             self._overlay_capture_error = 0
+            self._last_overlay_visibility: bool | None = None
             self.capture_timer = QTimer(self)
             self.capture_timer.timeout.connect(self._capture_reader_frame)
             self.scroll_poll_timer = QTimer(self)
@@ -920,14 +980,14 @@ def run_reader_app(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
             self.provider_combo.addItems(
-                ["Google", "DeepL", "Gemini", "Libre", "Argos offline", "Echo"]
+                ["Google", "DeepL", "Gemini", "Libre", "Aihub", "Argos offline", "Echo"]
             )
             saved_provider = str(
                 self.launch.config.translation.provider or "google"
             ).strip().lower()
             provider_label = {
                 "google": "Google", "deepl": "DeepL", "gemini": "Gemini",
-                "libre": "Libre", "argos": "Argos offline", "echo": "Echo",
+                "libre": "Libre", "aihub": "Aihub", "argos": "Argos offline", "echo": "Echo",
             }.get(saved_provider, "Google")
             provider_index = self.provider_combo.findText(provider_label)
             if provider_index >= 0:
@@ -949,7 +1009,9 @@ def run_reader_app(
             )
             self.provider_combo.currentTextChanged.connect(self._sync_provider_ui)
             translation_form.addRow("Provedor", self.provider_combo)
-            translation_form.addRow("Chave de API", self.deepl_key_input)
+            self.provider_credential_label = QLabel("Chave de API")
+            translation_form.addRow(self.provider_credential_label, self.deepl_key_input)
+            self._sync_provider_ui(self.provider_combo.currentText())
             panel_layout.addWidget(translation_group)
 
             capture_group = QGroupBox("Captura e overlay")
@@ -1033,17 +1095,33 @@ def run_reader_app(
         def _sync_overlay_geometry(self) -> None:
             # The translation overlay is a top-level transparent window
             # pinned over the webview (immune to Chromium recompositing).
-            # It follows the reader's visibility and focus: hidden when the
-            # reader is minimized, hidden or covered by another app.
+            # It follows the reader's visibility and application activation.
+            # Checking activeWindow() here is too strict: Windows can report
+            # the non-activating overlay itself as active during a compositor
+            # refresh, which used to hide/show the overlay repeatedly.
             global_top_left = self.webview.mapToGlobal(QPoint(0, 0))
-            self.overlay_widget.setGeometry(
-                QRect(global_top_left, self.webview.size())
+            geometry = QRect(global_top_left, self.webview.size())
+            if self.overlay_widget.geometry() != geometry:
+                self.overlay_widget.setGeometry(geometry)
+            app_active = (
+                QApplication.applicationState()
+                == Qt.ApplicationState.ApplicationActive
             )
-            focused = QApplication.activeWindow() is self
-            self.overlay_widget.setVisible(
-                focused and self.webview.isVisible() and not self.isMinimized()
+            should_show = (
+                app_active
+                and self.isVisible()
+                and self.webview.isVisible()
+                and not self.isMinimized()
                 and self.overlay_checkbox.isChecked()
             )
+            if self.overlay_widget.isVisible() != should_show:
+                self.overlay_widget.setVisible(should_show)
+                if self._last_overlay_visibility != should_show:
+                    _reader_log(
+                        f"overlay.visibility visible={should_show} "
+                        f"app_active={app_active} minimized={self.isMinimized()}"
+                    )
+            self._last_overlay_visibility = should_show
             self.selection_overlay.setGeometry(self.webview.geometry())
             if self.selection_overlay.isVisible():
                 self.selection_overlay.raise_()
@@ -1111,7 +1189,7 @@ def run_reader_app(
             changed = show_translation_history(
                 self, self.launch.config.cache.path
             )
-            if changed and self.runtime is not None and self.selected_region is not None:
+            if changed and self.runtime is not None:
                 self._translate_current_region()
 
         def _manage_translation_memory(self) -> None:
@@ -1120,7 +1198,7 @@ def run_reader_app(
             changed = manage_translation_memory(
                 self, self.launch.config.cache.path
             )
-            if changed and self.runtime is not None and self.selected_region is not None:
+            if changed and self.runtime is not None:
                 self._translate_current_region()
 
         def _edit_glossary(self) -> None:
@@ -1366,7 +1444,7 @@ def run_reader_app(
                 provider = str(self.launch.config.translation.provider or "google").lower()
                 labels = {
                     "google": "Google", "deepl": "DeepL", "gemini": "Gemini",
-                    "libre": "Libre", "argos": "Argos offline", "echo": "Echo",
+                    "libre": "Libre", "aihub": "Aihub", "argos": "Argos offline", "echo": "Echo",
                 }
                 self.provider_combo.setCurrentText(labels.get(provider, "Google"))
                 self.mode_combo.setCurrentText("Traduzir PT-BR")
@@ -1385,16 +1463,19 @@ def run_reader_app(
             self.analysis_combo.setCurrentText(profile.analysis_mode)
             self.fps_spin.setValue(profile.fps)
             self.overlay_checkbox.setChecked(profile.overlay_enabled)
-            region = scaled_region(profile.region, self.webview.width(), self.webview.height())
-            if region is not None:
-                self._handle_region_selected(region)
-            else:
-                self.selected_region = None
-                self.overlay_widget.set_viewport_region(None)
-                self.clear_region_button.setEnabled(False)
-                self._apply_capture_schedule()
-                self._sync_refresh_timer()
-            return region is not None
+            # Preferences above are restored, but the reading region is NOT
+            # auto-selected on load. Re-applying a saved region made the reader
+            # start translating by itself right after launch (e.g. the site
+            # homepage), which the user never asked to translate and which could
+            # freeze the UI. Translation must begin only when the user selects
+            # the area. The region stays selected while navigating within the
+            # same host in one session (this runs only when the host changes).
+            self.selected_region = None
+            self.overlay_widget.set_viewport_region(None)
+            self.clear_region_button.setEnabled(False)
+            self._apply_capture_schedule()
+            self._sync_refresh_timer()
+            return False
 
         def _apply_overlay_appearance(
             self,
@@ -1415,6 +1496,18 @@ def run_reader_app(
                 self.deepl_key_input.setText(self._api_keys[provider])
             needs_key = provider in {"deepl", "gemini", "libre"}
             self.deepl_key_input.setEnabled(needs_key)
+            self.provider_credential_label.setText(
+                "Identidade do app" if provider == "aihub" else "Chave de API"
+            )
+            if provider == "aihub":
+                self.deepl_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+                self.deepl_key_input.setText(
+                    str(self.launch.config.translation.aihub_app_package or "com.ultraocr")
+                )
+                self.deepl_key_input.setPlaceholderText("Identidade enviada ao Aihub")
+            else:
+                self.deepl_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+                self.deepl_key_input.setPlaceholderText("DeepL, Gemini ou Libre")
             self._sync_runtime_translation_settings()
 
         def _sync_runtime_translation_settings(self) -> None:
@@ -1672,6 +1765,8 @@ def run_reader_app(
             during fast scrolling (mid-scroll frames have cut-off balloons)."""
             if self.runtime is None or self.analysis_combo.currentText() != "Contínuo":
                 return
+            if self.selected_region is None:
+                return  # nothing to capture until the user selects a region
             if self.isMinimized() or not self.webview.isVisible():
                 return
             now = time.time()
@@ -1685,6 +1780,8 @@ def run_reader_app(
         def _poll_scroll(self) -> None:
             if self.runtime is None or self.analysis_combo.currentText() != "Contínuo":
                 return
+            if self.selected_region is None:
+                return  # no region selected: do not poll/capture automatically
             if self.isMinimized() or not self.webview.isVisible():
                 return
             self._poll_calls = getattr(self, "_poll_calls", 0) + 1
@@ -1757,7 +1854,7 @@ def run_reader_app(
                 self._scroll_moved_since_capture = True
                 self._last_scroll_move_at = time.time()
                 if self.runtime:
-                    self.runtime.invalidate_view(clear_overlay=False, scrolling=True)
+                    self.runtime.invalidate_view(clear_overlay=True, scrolling=True)
                 self._refresh_scroll_overlay()
                 self.scroll_settle_timer.start(
                     max(300, int(self.launch.config.diff.scroll_settle_ms))
@@ -1780,7 +1877,7 @@ def run_reader_app(
                     max(300, int(self.launch.config.diff.scroll_settle_ms))
                 )
                 if self.runtime:
-                    self.runtime.invalidate_view(clear_overlay=False, scrolling=True)
+                    self.runtime.invalidate_view(clear_overlay=True, scrolling=True)
                 self._refresh_scroll_overlay()
                 return
             previous_y = self._last_poll_y
@@ -1804,20 +1901,13 @@ def run_reader_app(
                 # pass only after the final position has remained still.
                 settle_ms = max(300, int(self.launch.config.diff.scroll_settle_ms))
                 self.scroll_settle_timer.start(settle_ms)
-                # Scrolling invalidates every viewport-anchored box on the
-                # spot — during scroll no frames are processed, so without
-                # this the old translations would linger over moved content.
+                # Restored balloon backgrounds are screenshots of the old
+                # viewport. Moving them with the page exposes their rectangular
+                # edges and can leave balloons from the previous page behind.
+                # Clear them until a fresh settled viewport has been read.
                 if self.runtime:
-                    scale = self.overlay_widget.capture_scale
-                    delta_y_px = round((previous_y - y) * scale)
-                    delta_x_px = round((previous_x - x) * scale)
-                    self._last_shifted_scroll_px = round(y * scale)
-                    viewport_size = self._last_capture_size
                     self.runtime.invalidate_view(
-                        clear_overlay=False,
-                        scroll_delta_x=delta_x_px,
-                        scroll_delta_y=delta_y_px,
-                        viewport_size=viewport_size,
+                        clear_overlay=True,
                         scrolling=True,
                     )
                 self._refresh_scroll_overlay()
@@ -1826,47 +1916,28 @@ def run_reader_app(
         def _capture_settled_scroll(self) -> None:
             if self.runtime is None or self.analysis_combo.currentText() != "Contínuo":
                 return
+            if self.selected_region is None:
+                return  # no region selected: ignore scroll-triggered analysis
             y = self._last_poll_y
             x = self._last_poll_x
-            from manga_rt_translator.scroll_regions import (
-                plan_scroll_analysis,
-                promote_interrupted_scroll_to_full_view,
-            )
+            from manga_rt_translator.scroll_regions import scroll_requires_analysis
 
-            pipeline = self.runtime.pipeline
-            analyze, dirty = plan_scroll_analysis(
-                self._captured_y,
-                y,
-                self._scroll_moved_since_capture,
-                baseline_ready=bool(
-                    pipeline is not None and pipeline.differ.has_baseline
-                ),
-                viewport_size=self._last_capture_size,
-                capture_scale=self.overlay_widget.capture_scale,
-                captured_x=self._captured_x,
-                current_x=x,
-                max_partial_fraction=0.7,
-            )
+            analyze = scroll_requires_analysis(
+                self._captured_y, y, self._scroll_moved_since_capture
+            ) or self._captured_x is None or x is None or x != self._captured_x
             retrying_interrupted_work = self.runtime.needs_full_refresh_after_scroll
-            analyze, dirty = promote_interrupted_scroll_to_full_view(
-                analyze, dirty, retrying_interrupted_work
-            )
-            if not analyze:
+            if not analyze and not retrying_interrupted_work:
                 return
             self._last_settle_capture = time.time()
             _reader_log(
                 f"scroll.settled y={y:.0f}; scheduling "
-                f"{'full retry' if retrying_interrupted_work else 'region'} analysis"
+                "full viewport analysis"
             )
             self.status.showMessage(
                 "Novo conteúdo detectado; lendo e traduzindo..."
             )
-            dirty_rects = (dirty,) if dirty is not None else ()
-            partial = bool(dirty_rects)
             if self._capture_reader_frame(
-                force_analyze=not partial,
-                dirty_rects=dirty_rects,
-                dirty_rects_stable=partial,
+                force_analyze=True,
             ):
                 if retrying_interrupted_work:
                     self.runtime.mark_scroll_refresh_submitted()
@@ -2112,8 +2183,12 @@ def run_reader_app(
                 return frame
             if status == "nochange":
                 return None
-            # dxcam unavailable: fall back to rendering the widget. With a
-            # reading region selected, render only that sub-rect.
+            # dxcam unavailable: fall back to rendering the WebView widget.
+            # ReaderOverlayWidget is a separate top-level window, so
+            # QWidget.grab() never includes it. Hiding/showing the overlay
+            # around each capture made translated captions visibly blink when
+            # this fallback was active (especially with a selected region).
+            # With a reading region selected, render only that sub-rect.
             self.overlay_widget.set_capture_scale(1.0)
             grab_rect = QRect()
             if self.selected_region is not None:
@@ -2128,45 +2203,38 @@ def run_reader_app(
             # after page events; retry briefly before giving up. Note: the
             # no-argument grab() is the historically reliable path — only
             # pass a rect when a region is actually selected.
-            overlay_was_visible = (
-                self.selected_region is not None and self.overlay_widget.isVisible()
-            )
-            if overlay_was_visible:
-                self.overlay_widget.hide()
+            # Failed captures are retried by the settle timer, never by
+            # sleeping on the GUI thread.
+            pixmap = self.webview.grab() if grab_rect.isNull() else self.webview.grab(grab_rect)
+            if pixmap is None or pixmap.isNull():
+                _reader_log("capture.pixmap_null")
+                return None
+            # Convert the pixmap once: calling toImage() twice (the second only
+            # to reach the Format enum) did a full extra pixmap->image copy per
+            # frame on the GUI thread.
+            raw_image = pixmap.toImage()
+            image = raw_image.convertToFormat(raw_image.Format.Format_RGBA8888)
+            width = image.width()
+            height = image.height()
+            if width <= 0 or height <= 0:
+                _reader_log(f"capture.empty size={width}x{height}")
+                return None
+            ptr = image.bits()
+            byte_count = image.sizeInBytes()
             try:
-                # Failed captures are retried by the settle timer, never by
-                # sleeping on the GUI thread.
-                pixmap = self.webview.grab() if grab_rect.isNull() else self.webview.grab(grab_rect)
-                if pixmap is None or pixmap.isNull():
-                    _reader_log("capture.pixmap_null")
-                    return None
-                image = pixmap.toImage().convertToFormat(pixmap.toImage().Format.Format_RGBA8888)
-                width = image.width()
-                height = image.height()
-                if width <= 0 or height <= 0:
-                    _reader_log(f"capture.empty size={width}x{height}")
-                    return None
-                ptr = image.bits()
-                byte_count = image.sizeInBytes()
-                try:
-                    ptr.setsize(byte_count)
-                except AttributeError:
-                    pass
-                buffer = bytes(ptr[:byte_count])
-                frame = np.frombuffer(buffer, dtype=np.uint8).reshape((height, width, 4))
-                rgb = np.ascontiguousarray(frame[:, :, :3])
-                logical = self.webview.size() if grab_rect.isNull() else grab_rect.size()
-                if (width, height) != (logical.width(), logical.height()):
-                    rgb = cv2.resize(rgb, (logical.width(), logical.height()),
-                                     interpolation=cv2.INTER_AREA)
-                # When a region is selected, grab_rect already rendered
-                # exactly the region content; cropping again would shift OCR
-                # coordinates and paint translations in the wrong place.
-                return rgb
-            finally:
-                if overlay_was_visible:
-                    self.overlay_widget.show()
-                    self.overlay_widget.raise_()
+                ptr.setsize(byte_count)
+            except AttributeError:
+                pass
+            buffer = bytes(ptr[:byte_count])
+            frame = np.frombuffer(buffer, dtype=np.uint8).reshape((height, width, 4))
+            rgb = np.ascontiguousarray(frame[:, :, :3])
+            logical = self.webview.size() if grab_rect.isNull() else grab_rect.size()
+            if (width, height) != (logical.width(), logical.height()):
+                rgb = cv2.resize(rgb, (logical.width(), logical.height()),
+                                 interpolation=cv2.INTER_AREA)
+            # When a region is selected, grab_rect already rendered exactly
+            # the region content; cropping again would shift OCR coordinates.
+            return rgb
 
         def _capture_reader_frame(
             self,
@@ -2175,6 +2243,14 @@ def run_reader_app(
             dirty_rects_stable: bool = False,
         ) -> bool:
             if self.runtime is None:
+                return False
+            # Automatic capture only runs after the user selects a reading
+            # region. Without one, continuous mode would grab and OCR the whole
+            # viewport on every sweep/scroll — this caused unwanted translation
+            # right on startup and heavy freezes on dense pages. The manual
+            # "Traduzir agora" path grabs directly (not through here), so a
+            # deliberate one-shot translation still works with no region.
+            if self.selected_region is None:
                 return False
             # A minimized window renders stale or empty content; grabbing it
             # wastes CPU and feeds garbage frames to the pipeline.
@@ -2226,9 +2302,28 @@ def run_reader_app(
 
     app = _create_app()
     _reader_log("startup.qt_application_ready")
+    # Single instance: two readers ran side by side (an old window left open
+    # plus a fresh launch), both doing OCR on the same CPU -> long freezes, and
+    # the old one kept running stale code. A stale lock from a crash is
+    # reclaimed automatically by QLockFile.
+    from PySide6.QtCore import QLockFile
+
+    instance_lock = QLockFile(str(Path.cwd() / ".reader.lock"))
+    instance_lock.setStaleLockTime(0)
+    if not instance_lock.tryLock(200):
+        _reader_log("startup.already_running")
+        QMessageBox.information(
+            None,
+            "UltraOCR",
+            "O UltraOCR já está aberto. Use a janela que já está rodando "
+            "(ou feche-a antes de abrir de novo).",
+        )
+        return 0
     resolved_glossary_path = resolve_glossary_path(glossary_path)
+    loaded_config = load_config(config_path)
+    configure_logging(loaded_config.logging)
     launch = ReaderLaunchContext(
-        config=load_config(config_path),
+        config=loaded_config,
         glossary=Glossary.load(resolved_glossary_path),
         initial_url=initial_url or "https://mangadex.org",
         glossary_path=str(resolved_glossary_path) if resolved_glossary_path else None,
@@ -2267,7 +2362,7 @@ def _fit_rect(rect: object, max_width: int, max_height: int, text: str = "") -> 
     # covers the original text completely, instead of a fixed-size card.
     # Portuguese often needs more horizontal space than the OCR source box.
     # Expanding width prevents the very tall one-word columns seen on dense pages.
-    text_width = min(320, max(110, int(max(1, len(text)) ** 0.5 * 42)))
+    text_width = min(360, max(120, int(max(1, len(text)) ** 0.5 * 52)))
     width = min(max(raw_width + 16, text_width), max_width - 4)
     # OCR boxes may span a tall stack of source lines. The translated caption
     # should follow its own wrapped text height instead of inheriting that
@@ -2280,6 +2375,36 @@ def _fit_rect(rect: object, max_width: int, max_height: int, text: str = "") -> 
     )
     y = min(max(0, getattr(rect, "y", 0) - 10), max(0, max_height - height))
     return PaintRect(x=x, y=y, width=width, height=height)
+
+
+def fit_text_in_ellipse(
+    width: int,
+    height: int,
+    measure: "Callable[[int], tuple[int, int]]",
+    longest_word: int,
+) -> tuple[int, int] | None:
+    """Pick a wrap width so a centred text block fits an oval balloon.
+
+    measure(wrap_width) -> (block_width, block_height) for the current font.
+    Tries wide-and-short first, then narrower wraps (taller blocks), and
+    accepts the first whose corners stay (nearly) inside the ellipse that the
+    balloon's bounding box describes. Returns (wrap_width, block_height).
+    """
+    if width <= 0 or height <= 0:
+        return None
+    for ratio in (0.86, 0.76, 0.66, 0.58):
+        wrap_width = max(1, int(width * ratio))
+        if longest_word > wrap_width:
+            continue
+        block_width, block_height = measure(wrap_width)
+        if block_height > height * 0.88 or block_width > width * 0.92:
+            continue
+        # Corners of the text block against the ellipse; centred lines make
+        # the real block rounder than a rectangle, so allow a little slack.
+        if (block_width / width) ** 2 + (block_height / height) ** 2 > 1.12:
+            continue
+        return wrap_width, block_height
+    return None
 
 
 def _rects_overlap(left: PaintRect, right: PaintRect, gap: int = 5) -> bool:
@@ -2326,6 +2451,7 @@ def _place_without_overlap(
     occupied: list[PaintRect],
     bounds: PaintRect,
     gap: int = 5,
+    max_distance: int | None = None,
 ) -> PaintRect | None:
     """Place close to the OCR anchor using free edges of existing captions."""
     anchor = _clamp_paint_rect(desired, bounds)
@@ -2347,6 +2473,11 @@ def _place_without_overlap(
         candidates,
         key=lambda point: (point[0] - anchor.x) ** 2 + (point[1] - anchor.y) ** 2,
     ):
+        if max_distance is not None:
+            dx = x - anchor.x
+            dy = y - anchor.y
+            if dx * dx + dy * dy > max_distance * max_distance:
+                continue
         candidate = PaintRect(x, y, anchor.width, anchor.height)
         if not any(_rects_overlap(candidate, other, gap) for other in occupied):
             return candidate
@@ -2357,11 +2488,21 @@ def _fit_text_rect(
     rect: PaintRect,
     text: str,
     painter: object,
+    max_width: int,
     max_height: int,
     text_flags: int,
     rect_type: object,
 ) -> PaintRect:
-    """Grow a bubble vertically when PT-BR needs more wrapped lines."""
+    """Grow the caption for long words and wrapped Portuguese text."""
+    metrics = painter.fontMetrics()
+    longest_word_width = max(
+        (metrics.horizontalAdvance(word) for word in text.split()),
+        default=0,
+    )
+    desired_width = min(max(1, max_width - 4), max(rect.width, longest_word_width + 20))
+    x = rect.x - (desired_width - rect.width) // 2
+    x = min(max(0, x), max(0, max_width - desired_width))
+    rect = PaintRect(x=x, y=rect.y, width=desired_width, height=rect.height)
     content_width = max(1, rect.width - 20)
     available_height = max(1, max_height - 20)
     bounds = painter.fontMetrics().boundingRect(

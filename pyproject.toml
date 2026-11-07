@@ -27,12 +27,25 @@ cv = [
 ocr = [
   "opencv-python==4.10.0.84",
   "paddleocr>=2.8.0",
+  # PaddleOCR 3.x runs on the paddlex pipeline and paddlepaddle; both are
+  # imported indirectly and must be installed. Validated with paddlepaddle
+  # 3.3.1 (the oneDNN workaround in ocr.py targets that build).
+  "paddlex>=3.0",
+  "paddlepaddle>=3.0",
 ]
 overlay = [
-  "PySide6>=6.6",
+  # 6.11 has a QWebEngineView child-widget lifecycle bug (see CONTEXT.md),
+  # mitigated by the top-level overlay; cap the range to avoid pulling an
+  # untested newer major on a fresh install.
+  "PySide6>=6.6,<6.12",
 ]
 fuzzy = [
   "rapidfuzz>=3.6",
+]
+# Optional ONNX Runtime OCR backend (detector = "rapid"). Ships prebuilt
+# PP-OCR models; lighter and usually faster than Paddle for English/Latin.
+rapid = [
+  "rapidocr-onnxruntime>=1.2",
 ]
 offline = [
   "argostranslate>=1.9.0",

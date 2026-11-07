@@ -5,14 +5,14 @@ import traceback
 
 from manga_rt_translator.cache import TranslationMemory
 from manga_rt_translator.capture import create_screen_stream
-from manga_rt_translator.config import AppConfig
+from manga_rt_translator.config import AppConfig, configure_logging
 from manga_rt_translator.diff import FrameDiffer
 from manga_rt_translator.glossary import Glossary
 from manga_rt_translator.ocr import create_ocr_engine
 from manga_rt_translator.overlay import Overlay, create_overlay
 from manga_rt_translator.pipeline import MangaTranslationPipeline, PipelineStats
 from manga_rt_translator.text_regions import TextRegionDetector
-from manga_rt_translator.translator import Translator, create_translator
+from manga_rt_translator.translator import Translator, create_translator, get_rate_tracker
 
 
 class NullOverlay(Overlay):
@@ -35,6 +35,7 @@ class TranslationSession:
         overlay_enabled: bool = True,
     ) -> None:
         self.config = config
+        configure_logging(config.logging)
         self.glossary = glossary
         self.echo_translator = echo_translator
         self.overlay_enabled = overlay_enabled
@@ -106,6 +107,7 @@ class TranslationSession:
         finally:
             if self._memory is not None:
                 self._memory.close()
+            get_rate_tracker().close()
 
 
 def _create_translator(config: AppConfig, echo_translator: bool) -> Translator:

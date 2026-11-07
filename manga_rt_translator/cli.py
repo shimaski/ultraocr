@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--provider",
         default=None,
-        choices=["google", "deepl", "gemini", "libre", "argos", "echo"],
+        choices=["google", "deepl", "gemini", "libre", "aihub", "argos", "echo"],
         help="Translation provider (default comes from config).",
     )
     run.add_argument(

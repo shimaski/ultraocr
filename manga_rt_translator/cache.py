@@ -698,6 +698,11 @@ class TranslationMemory:
             self.conn.executescript(
                 """
                 pragma journal_mode = wal;
+                -- In WAL mode NORMAL is still crash-safe for the database; it
+                -- only skips the fsync on every commit. Each cache hit bumps
+                -- frequency_count and commits, so FULL meant one disk flush per
+                -- translated balloon on the OCR worker thread.
+                pragma synchronous = normal;
 
                 create table if not exists translations (
                   id integer primary key,
@@ -749,6 +754,11 @@ class TranslationMemory:
 
                 create index if not exists translation_history_created_idx
                 on translation_history(created_at desc, id desc);
+
+                -- Fuzzy fallback reads the 80 most recent rows per language
+                -- pair on every exact miss; without this it sorts the table.
+                create index if not exists translations_recent_idx
+                on translations(language_pair, updated_at desc);
                 """
             )
             self.conn.commit()

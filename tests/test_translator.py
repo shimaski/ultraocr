@@ -12,6 +12,7 @@ from manga_rt_translator.translator import (
     GoogleWebTranslator,
     MyMemoryTranslator,
     RateLimitError,
+    RateLimitTracker,
     ResilientTranslator,
     Translator,
     _deepl_source,
@@ -163,7 +164,10 @@ def test_create_translator_defaults_to_google_chain_with_echo_last():
 
 
 def test_fallback_chain_returns_first_working_provider():
-    chain = FallbackChain([_FailingTranslator(), _FailingTranslator(), EchoTranslator()])
+    chain = FallbackChain(
+        [_FailingTranslator(), _FailingTranslator(), EchoTranslator()],
+        tracker=RateLimitTracker(max_cooldown_wait_s=0),
+    )
     result = chain.translate("Still there", "en", "pt-BR", Glossary.default())
     assert result.text == "Still there"
     assert result.provider == "echo"
@@ -188,7 +192,10 @@ class _RateLimitedTranslator(Translator):
 
 def test_fallback_chain_cools_down_rate_limited_provider():
     throttled = _RateLimitedTranslator()
-    chain = FallbackChain([throttled, EchoTranslator()])
+    chain = FallbackChain(
+        [throttled, EchoTranslator()],
+        tracker=RateLimitTracker(max_cooldown_wait_s=0),
+    )
     first = chain.translate("Hello", "en", "pt-BR", Glossary.default())
     assert first.provider == "echo"
     second = chain.translate("Hello again", "en", "pt-BR", Glossary.default())
@@ -294,6 +301,14 @@ def test_config_loader_ignores_removed_translation_keys(tmp_path):
                 'provider = "google"',
                 'model = "legacy-model"',
                 'ollama_url = "http://127.0.0.1:11434"',
+                "[rate_limits.google]",
+                "rps = 3.5",
+                "burst = 8",
+                "[logging]",
+                'level = "DEBUG"',
+                "rate_limiter_periodic_s = 12",
+                "rate_limiter_cache_s = 45",
+                "rate_limiter_emit_per_request = true",
             ]
         ),
         encoding="utf-8",
@@ -301,3 +316,9 @@ def test_config_loader_ignores_removed_translation_keys(tmp_path):
     config = load_config(config_path)
     assert config.translation.provider == "google"
     assert config.translation.target_lang == "pt-BR"
+    assert config.rate_limits.google.rps == 3.5
+    assert config.rate_limits.google.burst == 8
+    assert config.logging.level == "DEBUG"
+    assert config.logging.rate_limiter_periodic_s == 12
+    assert config.logging.rate_limiter_cache_s == 45
+    assert config.logging.rate_limiter_emit_per_request is True

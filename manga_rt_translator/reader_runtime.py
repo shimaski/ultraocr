@@ -16,13 +16,29 @@ from manga_rt_translator.models import Frame
 from manga_rt_translator.ocr import create_ocr_engine, lower_thread_priority
 from manga_rt_translator.pipeline import MangaTranslationPipeline
 from manga_rt_translator.text_regions import TextRegionDetector
-from manga_rt_translator.translator import create_translator
+from manga_rt_translator.translator import create_translator, get_rate_tracker
 from manga_rt_translator.work_queue import LatestFrameQueue, ViewState, WorkCancelled
+
+
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
+def rotate_log(path: Path) -> None:
+    """Keep the debug log bounded: past 5 MB it moves to <name>.1 (one backup)."""
+    try:
+        if path.stat().st_size > _LOG_MAX_BYTES:
+            backup = path.with_name(path.name + '.1')
+            backup.unlink(missing_ok=True)
+            path.rename(backup)
+    except OSError:
+        pass
 
 
 def reader_log(message: str) -> None:
     try:
-        with Path('.reader_debug.log').open('a', encoding='utf-8') as handle:
+        path = Path('.reader_debug.log')
+        rotate_log(path)
+        with path.open('a', encoding='utf-8') as handle:
             handle.write(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {message}\n')
         print(f'[reader] {message}', flush=True)
     except OSError:
@@ -146,7 +162,10 @@ class ReaderRuntime:
                 # committed atomically by the pipeline.
                 self.pipeline.discard_obsolete(clear_items=False)
         self.phase = 'Lendo o conteudo atual...'
-        reader_log(f'capture.queued frame={frame.index} force={force_analyze} size={self.last_capture_shape}')
+        # Only forced captures are logged: the continuous sweep queues a frame
+        # several times a second and used to write a line to disk for each.
+        if force_analyze:
+            reader_log(f'capture.queued frame={frame.index} force={force_analyze} size={self.last_capture_shape}')
 
     def stats_text(self) -> str:
         if self.last_error:
@@ -192,6 +211,9 @@ class ReaderRuntime:
                     if not request.token.current():
                         continue
                     before = self.pipeline.stats.ocr_regions
+                    ocr_engine = self.pipeline.ocr
+                    calls_before = getattr(ocr_engine, 'engine_calls', 0)
+                    upscales_before = getattr(ocr_engine, 'upscale_retries', 0)
                     started = time.perf_counter()
                     if request.inspect:
                         self._inspect(request)
@@ -205,8 +227,20 @@ class ReaderRuntime:
                     request.token.check()
                     count = self.pipeline.stats.ocr_regions - before
                     self.phase = ('Aguardando novo conteudo' if count else 'Nenhum texto novo encontrado')
-                    reader_log(f'analysis.done frame={request.frame.index} regions={count} '
-                               f'elapsed_ms={(time.perf_counter()-started)*1000:.0f}')
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    # Idle frames (no text, fast) are the vast majority and
+                    # carry no information; log only frames that did work.
+                    if count or elapsed_ms >= 250 or request.force:
+                        stats = self.pipeline.stats
+                        reader_log(
+                            f'analysis.done frame={request.frame.index} regions={count} '
+                            f'elapsed_ms={elapsed_ms:.0f} ocr_ms={stats.last_ocr_ms:.0f} '
+                            f'refine_ms={stats.last_refine_ms:.0f} '
+                            f'candidates={stats.last_candidates} bubbles={stats.last_bubbles} '
+                            f'rescued={stats.last_rescued} '
+                            f'engine_calls={getattr(ocr_engine, "engine_calls", 0) - calls_before} '
+                            f'upscale_retries={getattr(ocr_engine, "upscale_retries", 0) - upscales_before}'
+                        )
                     request.token.commit(lambda: self.status_callback(self.stats_text()))
                 except WorkCancelled:
                     reader_log(f'analysis.obsolete frame={request.frame.index}')
@@ -225,6 +259,7 @@ class ReaderRuntime:
                 self.pipeline.close(wait=True)
             if memory:
                 memory.close()
+            get_rate_tracker().close()
             reader_log('runtime.stop')
 
     def _inspect(self, request: object) -> None:

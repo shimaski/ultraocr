@@ -9,7 +9,7 @@ from manga_rt_translator.image_hash import crop_image, perceptual_region_hash
 from manga_rt_translator.models import Rect, TextRegion
 from manga_rt_translator.ocr import (
     ComicTextOcr, OcrEngine, PaddleOcrEngine, _ENGINE_LOCK, _INFERENCE_LOCK,
-    _no_cancel, group_text_regions,
+    _no_cancel, group_text_regions, resolve_cpu_threads,
 )
 from manga_rt_translator.work_queue import WorkCancelled
 
@@ -42,7 +42,8 @@ class HybridOcrEngine(OcrEngine):
             if model not in _RECOGNIZERS:
                 from paddleocr import TextRecognition
                 _RECOGNIZERS[model] = TextRecognition(
-                    model_name=model, device='cpu', enable_mkldnn=False, cpu_threads=4,
+                    model_name=model, device='cpu', enable_mkldnn=False,
+                    cpu_threads=resolve_cpu_threads(self.config),
                 )
             return _RECOGNIZERS[model]
 
@@ -99,7 +100,10 @@ class HybridOcrEngine(OcrEngine):
                     output.extend(repaired)
                 elif block.confidence >= self.config.min_confidence:
                     output.append(block)
-        return output
+        # Candidate ROIs may split one paragraph across neighboring tiles.
+        # Join those detections in page coordinates after the per-ROI fast and
+        # fallback passes, using the same balloon-boundary checks as PaddleOCR.
+        return group_text_regions(output, image)
 
     def _fast_lines(self, image: np.ndarray, region: Rect,
                     check: Callable[[], None]) -> list[TextRegion]:

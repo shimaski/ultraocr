@@ -108,7 +108,7 @@ class SiteProfileStore:
             )
             if source not in {"Auto", "en", "japan", "korean"}:
                 source = "Auto"
-            if provider not in {"Google", "DeepL", "Gemini", "Libre", "Argos offline", "Echo"}:
+            if provider not in {"Google", "DeepL", "Gemini", "Libre", "Aihub", "Argos offline", "Echo"}:
                 provider = "Google"
             if analysis not in {"Manual", "Contínuo"}:
                 analysis = "Contínuo"

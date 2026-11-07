@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,15 @@ class DiffConfig:
     scroll_cooldown_ms: int = 300
     # Debounce used by the event-driven selected-region reader.
     scroll_settle_ms: int = 550
+    # Suppress runaway re-OCR of a spot that keeps changing in place — animated
+    # ads, auto-rotating carousels, GIF banners. After a location fires this
+    # many times inside the window it is skipped until the older fires age out,
+    # so it re-checks occasionally instead of hammering OCR (the main cause of
+    # "it freezes out of nowhere"). Real reading text appears once and never
+    # trips this. Set animation_suppression = false to turn it off.
+    animation_suppression: bool = True
+    animation_window_ms: int = 9000
+    animation_max_fires: int = 3
 
 
 @dataclass
@@ -56,12 +66,18 @@ class OcrConfig:
     upscale_retry_max_pixels: int = 250_000
     # Cap large OCR crops before inference; geometry is mapped to the source frame.
     max_input_side: int = 640
+    # CPU threads for PaddleOCR inference. 0 = auto (min(8, cpu_count)); the
+    # recognizer is CPU-bound, so more threads shorten a dense page on a
+    # many-core machine. OCR runs below-normal priority, so it yields to the UI.
+    cpu_threads: int = 0
 
 
 @dataclass
 class TranslationConfig:
     target_lang: str = "pt-BR"
     provider: str = "google"
+    aihub_app_package: str = "com.ultraocr"
+    aihub_engine: str = "gemini"
     deepl_api_key: str = ""
     deepl_free: bool = True
     # Free Gemini API key (aistudio.google.com/apikey) — context-aware LLM
@@ -97,6 +113,36 @@ class CacheConfig:
 
 
 @dataclass
+class ProviderRateLimitConfig:
+    failure_threshold: int = 3
+    open_duration_s: float = 120.0
+    rps: float = 1.0
+    burst: int = 3
+    quality: int = 5
+    daily_limit: int = 0
+    reset_at_utc_hour: int = 0
+    chars: bool = False
+
+
+@dataclass
+class RateLimitsConfig:
+    google: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(3, 60, 4.0, 10, 6, 0))
+    gemini: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(5, 180, 0.5, 5, 9, 1500))
+    aihub: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(3, 60, 1.0, 3, 8, 0))
+    deepl: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(3, 120, 1.0, 3, 9, 500000, 1, True))
+    libre: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(3, 60, 10.0, 20, 7, 0))
+    mymemory: ProviderRateLimitConfig = field(default_factory=lambda: ProviderRateLimitConfig(3, 120, 0.5, 3, 5, 50000))
+
+
+@dataclass
+class LoggingConfig:
+    level: str = "INFO"
+    rate_limiter_periodic_s: float = 30.0
+    rate_limiter_cache_s: float = 60.0
+    rate_limiter_emit_per_request: bool = False
+
+
+@dataclass
 class AppConfig:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     diff: DiffConfig = field(default_factory=DiffConfig)
@@ -104,6 +150,8 @@ class AppConfig:
     translation: TranslationConfig = field(default_factory=TranslationConfig)
     overlay: OverlayConfig = field(default_factory=OverlayConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    rate_limits: RateLimitsConfig = field(default_factory=RateLimitsConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 def load_config(path: str | Path | None) -> AppConfig:
@@ -127,6 +175,11 @@ def load_config(path: str | Path | None) -> AppConfig:
     _apply_section(config.translation, data.get("translation", {}))
     _apply_section(config.overlay, data.get("overlay", {}))
     _apply_section(config.cache, data.get("cache", {}))
+    _apply_section(config.logging, data.get("logging", {}))
+    rate_limits = data.get("rate_limits", {})
+    for provider_name in config.rate_limits.__dataclass_fields__:
+        values = rate_limits.get(provider_name, {}) if isinstance(rate_limits, dict) else {}
+        _apply_section(getattr(config.rate_limits, provider_name), values)
 
     if isinstance(config.capture.region, list):
         config.capture.region = tuple(config.capture.region)  # type: ignore[assignment]
@@ -135,6 +188,12 @@ def load_config(path: str | Path | None) -> AppConfig:
     # shareable TOML file. Environment values intentionally win over TOML.
     _apply_env_secrets(config.translation)
     return config
+
+
+def configure_logging(config: LoggingConfig) -> None:
+    level = getattr(logging, str(config.level).upper(), logging.INFO)
+    logging.basicConfig(level=level, format="%(message)s")
+    logging.getLogger().setLevel(level)
 
 
 def _apply_env_secrets(translation: TranslationConfig) -> None:

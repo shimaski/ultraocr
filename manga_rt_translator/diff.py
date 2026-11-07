@@ -4,6 +4,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+try:  # OpenCV is a project dependency; keep a numpy fallback regardless.
+    import cv2
+except ImportError:  # pragma: no cover
+    cv2 = None
+
 from manga_rt_translator.config import DiffConfig
 from manga_rt_translator.image_hash import region_hash
 from manga_rt_translator.models import Frame, Rect
@@ -25,6 +30,9 @@ class FrameDiffer:
         self._previous: np.ndarray | None = None
         self._pending: list[PendingRegion] = []
         self._cooldown_until = 0.0
+        # (rect, timestamp) of recent OCR fires, used to spot a location that
+        # keeps re-firing (animation) and throttle it. Pruned to the window.
+        self._fire_log: list[tuple[Rect, float]] = []
         # True on ticks where the change was scroll-like (most of the frame
         # moved). Consumers use it to drop viewport-anchored state such as
         # overlay bubbles that no longer sit on their content.
@@ -78,6 +86,7 @@ class FrameDiffer:
         """Set a known full-frame baseline after an explicit viewport read."""
         self._previous = frame.image.copy()
         self._pending.clear()
+        self._fire_log.clear()
         self._cooldown_until = 0.0
         self.last_tick_had_large_change = False
 
@@ -91,36 +100,43 @@ class FrameDiffer:
             height, width = current.shape[:2]
             return [Rect(0, 0, width, height)]
 
-        diff = np.abs(current.astype(np.int16) - previous.astype(np.int16))
-        if diff.ndim == 3:
-            diff = diff.mean(axis=2)
-        mask = diff > self.config.pixel_threshold
+        mask = _changed_pixel_mask(previous, current, self.config.pixel_threshold)
 
         tile = self.config.tile_size
         height, width = mask.shape[:2]
         changed: list[Rect] = []
-        total_tiles = 0
 
-        for y in range(0, height, tile):
-            for x in range(0, width, tile):
-                total_tiles += 1
-                tile_mask = mask[y : min(y + tile, height), x : min(x + tile, width)]
-                if tile_mask.size == 0:
-                    continue
-                ratio = float(tile_mask.mean())
-                if ratio >= self.config.min_changed_ratio:
-                    changed.append(
-                        Rect(
-                            x=x,
-                            y=y,
-                            width=min(tile, width - x),
-                            height=min(tile, height - y),
-                        )
-                    )
+        # Vectorised per-tile changed-pixel ratio (was a Python loop over every
+        # tile on each frame). Pad to a tile multiple, sum per tile, divide by
+        # each tile's real area so edge tiles keep the exact same ratio.
+        tiles_y = -(-height // tile)
+        tiles_x = -(-width // tile)
+        total_tiles = tiles_y * tiles_x
+        padded = np.zeros((tiles_y * tile, tiles_x * tile), dtype=np.uint32)
+        padded[:height, :width] = mask
+        counts = padded.reshape(tiles_y, tile, tiles_x, tile).sum(axis=(1, 3))
+        tile_h = np.minimum(tile, height - np.arange(tiles_y) * tile)
+        tile_w = np.minimum(tile, width - np.arange(tiles_x) * tile)
+        areas = tile_h[:, None] * tile_w[None, :]
+        ratios = counts / areas
+        for ty, tx in zip(*np.nonzero(ratios >= self.config.min_changed_ratio)):
+            x = int(tx) * tile
+            y = int(ty) * tile
+            changed.append(
+                Rect(
+                    x=x,
+                    y=y,
+                    width=min(tile, width - x),
+                    height=min(tile, height - y),
+                )
+            )
 
         changed_ratio = (len(changed) / total_tiles) if total_tiles else 0.0
         if changed_ratio >= self.config.large_change_tile_ratio:
             self._pending.clear()
+            # A scroll/large change means fresh content; forget the old
+            # per-location fire history so new text is never wrongly throttled.
+            self._fire_log.clear()
             self._cooldown_until = timestamp + (self.config.scroll_cooldown_ms / 1000.0)
             self.last_tick_had_large_change = True
             return []
@@ -163,12 +179,60 @@ class FrameDiffer:
                 continue
 
             if frame.timestamp - pending.last_changed_at >= stable_seconds:
+                if self._is_animation_spam(pending.rect, frame.timestamp):
+                    # A spot re-firing this fast is animation (ad/carousel),
+                    # not new reading content. Drop it this cycle instead of
+                    # re-OCRing; it re-checks once the older fires age out.
+                    continue
                 ready.append(pending.rect)
+                self._fire_log.append((pending.rect, frame.timestamp))
             else:
                 keep.append(pending)
 
         self._pending = keep
         return merge_rects(ready, gap=self.config.roi_padding)
+
+    def _is_animation_spam(self, rect: Rect, now: float) -> bool:
+        if not getattr(self.config, "animation_suppression", True):
+            return False
+        window = self.config.animation_window_ms / 1000.0
+        self._fire_log = [
+            (fired_rect, fired_at)
+            for fired_rect, fired_at in self._fire_log
+            if now - fired_at <= window
+        ]
+        count = sum(
+            1 for fired_rect, _ in self._fire_log if fired_rect.intersects(rect)
+        )
+        return count >= int(self.config.animation_max_fires)
+
+
+_ONES_1X3 = np.ones((1, 3), np.float32)
+
+
+def _changed_pixel_mask(previous: np.ndarray, current: np.ndarray, threshold: float) -> np.ndarray:
+    """Boolean mask of pixels whose mean per-channel abs diff exceeds threshold.
+
+    The fast path uses OpenCV (~4x quicker at 1080p). mean(|d|) > T is the same
+    as sum(|d|) > 3T for 3 channels; the uint8 sum saturates at 255, so the fast
+    path is only used while 3T < 255, where saturation cannot flip the result.
+    """
+    if (
+        cv2 is not None
+        and current.ndim == 3
+        and current.shape[2] == 3
+        and current.dtype == np.uint8
+        and previous.dtype == np.uint8
+        and 3 * threshold < 255
+    ):
+        summed = cv2.transform(cv2.absdiff(current, previous), _ONES_1X3)
+        if summed.ndim == 3:
+            summed = summed[..., 0]
+        return summed > 3 * threshold
+    diff = np.abs(current.astype(np.int16) - previous.astype(np.int16))
+    if diff.ndim == 3:
+        diff = diff.mean(axis=2)
+    return diff > threshold
 
 
 def merge_rects(rects: list[Rect], gap: int = 0) -> list[Rect]:

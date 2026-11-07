@@ -162,12 +162,16 @@ def create_qt_overlay(config: OverlayConfig) -> Overlay:
                 patch_rect = item.background_rect
                 if patch is None or patch_rect is None or item.text == item.source_text:
                     continue
+                patch_format = (
+                    QImage.Format.Format_RGBA8888
+                    if patch.shape[2] == 4 else QImage.Format.Format_RGB888
+                )
                 image = QImage(
                     patch.data,
                     patch.shape[1],
                     patch.shape[0],
                     int(patch.strides[0]),
-                    QImage.Format.Format_RGB888,
+                    patch_format,
                 ).copy()
                 painter.drawImage(
                     QRectF(

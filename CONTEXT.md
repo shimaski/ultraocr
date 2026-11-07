@@ -1,8 +1,52 @@
 # CONTEXT.md — UltraOCR (Manga Real-Time Translator)
 
 > Documento de contexto acumulado das sessões de desenvolvimento.
-> Última atualização: 2026-09-07. As notas abaixo são históricas;
+> Última atualização: 2026-10-14. As notas abaixo são históricas;
 > esta primeira seção descreve o comportamento mais recente.
+
+## Estado atual — 14/10/2026: núcleo do leitor e reconstrução Gaminik
+
+- Produto-alvo: Manga Real-Time Translator local-first para leitura no navegador.
+  O escopo concluído é o fluxo central de mangá/webtoon, não uma cópia integral
+  do Gaminik.
+- Captura contínua/event-driven com WGC por HWND, DXGI como fallback e render do
+  QtWebEngine como último recurso. Frames passam por differencing; OCR é acionado
+  para mudanças/ROI, não por screenshots manuais repetidos.
+- Leitor acompanha `scrollX/scrollY` de `window` ou do contêiner rolável mais
+  próximo à seleção. Rolagem de um eixo processa só a faixa revelada; diagonal,
+  salto grande ou baseline ausente usa viewport completa. Caixas existentes
+  acompanham o conteúdo em X e Y.
+- Poll mede dimensões CSS, DPR e viewport. Mudança de zoom/viewport invalida a
+  geometria e agenda leitura completa após estabilização.
+- Tradução PT-BR via provedores configuráveis, cache SQLite textual/visual,
+  glossário global e por obra, fila assíncrona/cancelável e overlay transparente
+  com posicionamento anti-colisão, adaptação ao balão e reparo/inpainting local.
+- Padrão OCR de entrada grande usa `max_input_side=640`, configurável. Benchmark
+  em duas capturas reais manteve o texto reconhecido e reduziu o OCR aquecido
+  15–21% contra 768; 512 falhou numa palavra, então não é o padrão.
+- Testes: `.venv311\Scripts\pytest.exe -q` → 193 passaram. Integração real Qt +
+  WebView + PaddleOCR validou seleção única, texto novo após scroll vertical e
+  horizontal, e, na execução padrão, mudança de zoom do browser seguida por
+  leitura completa. Scroll vertical/horizontal também passou com escala Qt 1,25.
+  Harness: `scripts\validate_reader_scroll.py`; pode anotar quando o Windows
+  não concede foco, caso em que não afirma visibilidade do overlay.
+- Documentação de paridade/evidências REA: `docs/gaminik-5.1-reconstruction.md`
+  e `docs/gaminik-5.1-rea-analysis.md`. A análise é independente, baseada em
+  metadados/decompilação autorizada; não reutilizar código, marca ou serviços
+  privados/licenciados do Gaminik.
+- Escopo deliberado: sem pagamentos/créditos/conta do Gaminik. O usuário decidiu
+  deixar áudio e transcrição para um projeto paralelo futuro. Isso não está
+  implementado neste app. Também permanecem modos extras não essenciais como
+  hover/entrada de texto/lote e backends macOS/Linux.
+- Não alegar validação universal: testar páginas reais densas, mangá japonês com
+  fontes estilizadas, sessões longas, monitores físicos com DPI misto e foco do
+  overlay no ambiente do usuário. O fixture integrado é controlado.
+- Preferências registradas: não usar Ollama; tradução deve terminar em PT-BR;
+  Gemini é fallback/último recurso conforme configuração. Não contornar bloqueios
+  ou limites de IP de provedores; preferir fallback legítimo, backoff e seleção
+  de outro provedor.
+- Próximo projeto separado: áudio do sistema → transcrição → tradução; iniciar
+  em tarefa própria quando o usuário retomar esse assunto.
 
 ## Atualização 07/09/2026: Fila, OCR e Validação
 

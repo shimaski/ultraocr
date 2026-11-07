@@ -167,6 +167,55 @@ def test_pipeline_translates_stable_region_and_caches_visual_hits(tmp_path):
     memory.close()
 
 
+def test_incremental_scan_recovers_text_ocr_missed_inside_changed_bubble(
+    tmp_path, monkeypatch
+):
+    class MissThenReadBubbleOcr:
+        detects_text = True
+
+        def __init__(self):
+            self.calls = []
+
+        def recognize(self, image, regions):
+            self.calls.append(list(regions))
+            if len(self.calls) == 1:
+                return []
+            return [
+                TextRegion(
+                    bbox=Rect(112, 112, 84, 28),
+                    text="Hello there",
+                    confidence=0.91,
+                    source_lang="en",
+                    visual_hash="recovered-bubble-text",
+                )
+            ]
+
+    bubble = Rect(100, 80, 120, 100)
+    monkeypatch.setattr(
+        "manga_rt_translator.pipeline.detect_enclosed_speech_bubbles",
+        lambda _image: [type("Bubble", (), {"bounds": bubble})()],
+    )
+    ocr = MissThenReadBubbleOcr()
+    _config, pipeline, _overlay, memory = _build_pipeline(tmp_path, ocr=ocr)
+    image = np.full((400, 500, 3), 245, dtype=np.uint8)
+
+    items = pipeline.process_frame(
+        Frame(
+            image=image,
+            timestamp=1.0,
+            index=0,
+            dirty_rects=(bubble,),
+            dirty_rects_stable=True,
+        )
+    )
+
+    assert len(ocr.calls) == 2
+    assert ocr.calls[1] == [bubble]
+    assert any(item.source_text == "Hello there" for item in items)
+    pipeline.close()
+    memory.close()
+
+
 def test_pipeline_propagates_capture_viewport_to_overlay(tmp_path):
     _config, pipeline, overlay, memory = _build_pipeline(tmp_path)
     viewport = CaptureViewport(
@@ -233,7 +282,7 @@ def test_work_scoped_glossary_partitions_textual_and_visual_memory(tmp_path):
     memory.close()
 
 
-def test_scroll_like_change_clears_stale_overlay(tmp_path):
+def test_scroll_like_change_keeps_overlay_until_replacement(tmp_path):
     class ScrollTickDiffer(FrameDiffer):
         def __init__(self, config):
             super().__init__(config)
@@ -268,14 +317,15 @@ def test_scroll_like_change_clears_stale_overlay(tmp_path):
     pipeline.process_frame(Frame(image=image.copy(), timestamp=1.0 + stable_seconds, index=1))
     assert len(overlay.items) == 1
 
-    # The user scrolls: the differ flags a scroll-like change and the stale
-    # overlay must fade out quickly (short TTL) — not persist for the full
-    # TTL nor vanish instantly mid-analysis.
+    # The differ flags a large change. Keep the existing translation on screen
+    # until the full-frame replacement is ready instead of expiring it while
+    # OCR and translation are still running.
     pipeline.differ.force_large_change = True
     items = pipeline.process_frame(Frame(image=image.copy(), timestamp=2.0, index=2))
     assert len(items) == 1
+    assert items[0].text == "Ola aventura"
     assert items[0].expires_at is not None
-    assert items[0].expires_at - time.time() <= 1.3
+    assert items[0].expires_at - time.time() > 100
     memory.close()
 
 
